@@ -30,6 +30,12 @@ CLI usage:
 tbn check <file.tbn>           # Type-check and deadlock analysis (no codegen)
 ```
 
+## Git Hooks
+
+Enforced via `.githooks/` + `core.hooksPath`:
+- **pre-commit:** `cargo fmt --check` + `cargo clippy -- -D warnings`
+- **pre-push:** `cargo test`
+
 ## Architecture
 
 ### Language Primitives
@@ -46,7 +52,7 @@ Tourbillon has exactly three constructs:
 
 ### Compiler Pipeline (7 stages)
 
-1. **Parse** → CST (winnow or chumsky)
+1. **Parse** → CST (chumsky)
 2. **Desugar** → Cells to depth-1 Queues; pattern match to decision trees
 3. **Type Check** → Hindley-Milner + linear-type discipline on Cells (peek exempt from linearity)
 4. **Elaborate** → Resolve pipes, flatten hierarchy, build process network graph

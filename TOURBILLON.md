@@ -438,7 +438,7 @@ The compiler is implemented in Rust. The pipeline is:
        │
        ▼
   ┌─────────┐
-  │  Parse   │   pest / winnow grammar → CST
+  │  Parse   │   chumsky grammar → CST
   └────┬─────┘
        │
        ▼
@@ -475,18 +475,19 @@ The compiler is implemented in Rust. The pipeline is:
   .sv output + build manifest
 ```
 
-### 5.1 Key Rust Crates
+### 5.1 Rust Crates
 
-| Concern | Candidate |
-|---|---|
-| Parsing | `winnow` or `chumsky` (error recovery) |
-| Type checking | Custom, but structured after `rustc`'s trait solver patterns |
-| IR | `petgraph` for the process network graph |
-| SV emission | `askama` templates or direct `Write` |
-| Hashing | `blake3` |
-| Build cache | `cacache` (content-addressable, Nix-like) |
-| JTAG/UART | `serialport` for verify; `probe-rs` for JTAG |
-| CLI | `clap` |
+| Concern | Crate | Status |
+|---|---|---|
+| Parsing | `chumsky` 1.0-alpha (error recovery) | In use |
+| Diagnostics | `ariadne` 0.5 (span-highlighted errors) | In use |
+| CLI | `clap` 4 (derive) | In use |
+| Type checking | Custom, structured after `rustc`'s trait solver patterns | Planned |
+| IR | `petgraph` for the process network graph | Planned |
+| SV emission | `askama` templates or direct `Write` | Planned |
+| Hashing | `blake3` | Planned |
+| Build cache | `cacache` (content-addressable, Nix-like) | Planned |
+| JTAG/UART | `serialport` for verify; `probe-rs` for JTAG | Planned |
 
 ### 5.2 Intermediate Representation
 
@@ -557,14 +558,14 @@ tbn init <name>                 Scaffold a new Tourbillon project
 
 ## 9. Roadmap
 
-| Phase | Deliverable | Scope |
-|---|---|---|
-| **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output |
-| **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` |
-| **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware |
-| **3 — Verify** | `tbn status` / `tbn verify` over UART/JTAG | Provenance chain to running FPGA |
-| **4 — Formal** | mCRL2 export + deadlock checker | Verification story |
-| **5 — Session** | Protocol types on queue interfaces | Advanced type system |
+| Phase | Deliverable | Scope | Status |
+|---|---|---|---|
+| **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output | **In progress** — project scaffolded, stubs in place |
+| **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | Planned |
+| **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | Planned |
+| **3 — Verify** | `tbn status` / `tbn verify` over UART/JTAG | Provenance chain to running FPGA | Planned |
+| **4 — Formal** | mCRL2 export + deadlock checker | Verification story | Planned |
+| **5 — Session** | Protocol types on queue interfaces | Advanced type system | Planned |
 
 ---
 
