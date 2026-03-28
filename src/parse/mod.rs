@@ -6,10 +6,7 @@ use crate::diagnostics::Diagnostic;
 pub fn parse(src: &str) -> (Option<SourceFile>, Vec<Diagnostic>) {
     let _ = src;
     // TODO: implement chumsky parser
-    (
-        Some(SourceFile { items: vec![] }),
-        vec![],
-    )
+    (Some(SourceFile { items: vec![] }), vec![])
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@ pub mod diagnostics;
 pub mod parse;
 pub mod types;
 
-use diagnostics::{report_errors, Errors};
+use diagnostics::{Errors, report_errors};
 
 /// Run the Phase 0 pipeline: parse → desugar → type-check.
 pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
@@ -12,7 +12,9 @@ pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
 
     if !parse_errors.is_empty() {
         report_errors(src, filename, &parse_errors);
-        return Err(Errors { diagnostics: parse_errors });
+        return Err(Errors {
+            diagnostics: parse_errors,
+        });
     }
 
     let cst = cst.expect("no CST produced despite zero parse errors");
@@ -21,7 +23,9 @@ pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
     let type_errors = types::check(&ast);
     if !type_errors.is_empty() {
         report_errors(src, filename, &type_errors);
-        return Err(Errors { diagnostics: type_errors });
+        return Err(Errors {
+            diagnostics: type_errors,
+        });
     }
 
     Ok(())

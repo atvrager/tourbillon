@@ -80,9 +80,7 @@ pub enum TypeExpr {
         depth: Option<u64>,
     },
     /// Cell type: `Cell(T, init = expr)`
-    Cell {
-        elem: Box<Spanned<TypeExpr>>,
-    },
+    Cell { elem: Box<Spanned<TypeExpr>> },
 }
 
 // ---------------------------------------------------------------------------

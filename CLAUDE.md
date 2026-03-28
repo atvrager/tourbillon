@@ -8,6 +8,13 @@ Tourbillon (`tbn`) is a queue-centric hardware description language implemented 
 
 **Status:** Phase 0 — parser, desugaring, and type checker scaffolded. `TOURBILLON.md` is the authoritative specification.
 
+## Setup
+
+After cloning, activate the git hooks:
+```
+git config core.hooksPath .githooks
+```
+
 ## Build Commands
 
 ```
