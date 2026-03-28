@@ -6,11 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Pre-implementation. `TOURBILLON.md` is the authoritative specification. No compiler code exists yet.
+**Status:** Phase 0 — parser, desugaring, and type checker scaffolded. `TOURBILLON.md` is the authoritative specification.
 
-## Planned Build Commands
-
-Once the Rust project is scaffolded:
+## Build Commands
 
 ```
 cargo build                    # Build the tbn compiler
@@ -20,11 +18,9 @@ cargo clippy                   # Lint
 cargo fmt --check              # Check formatting
 ```
 
-The compiler CLI (once built):
+CLI usage:
 ```
-tbn build [--target <fpga>]    # Compile .tbn → SystemVerilog
-tbn check                      # Type-check and deadlock analysis (no codegen)
-tbn graph                      # Emit process network as DOT/Mermaid
+tbn check <file.tbn>           # Type-check and deadlock analysis (no codegen)
 ```
 
 ## Architecture
@@ -60,16 +56,30 @@ The central IR is a **process network graph** (planned via `petgraph`):
 
 This graph enables deadlock analysis (Petri net / KPN capacity checks), rule conflict detection, and scheduling.
 
-### Key Rust Crates (Planned)
+### Key Rust Crates
 
-| Concern | Crate |
-|---|---|
-| Parsing | `winnow` or `chumsky` |
-| IR graph | `petgraph` |
-| SV emission | `askama` or direct `Write` |
-| Hashing | `blake3` |
-| Build cache | `cacache` |
-| CLI | `clap` |
+| Concern | Crate | Phase |
+|---|---|---|
+| Parsing | `chumsky` 1.0-alpha | 0 |
+| Diagnostics | `ariadne` 0.5 | 0 |
+| CLI | `clap` 4 (derive) | 0 |
+| IR graph | `petgraph` | 1+ |
+| SV emission | `askama` or direct `Write` | 1+ |
+| Hashing | `blake3` | 1+ |
+| Build cache | `cacache` | 1+ |
+
+### Module Layout
+
+```
+src/
+  main.rs          -- CLI (clap): tbn check <file>
+  lib.rs           -- Pipeline: parse → desugar → type-check
+  ast.rs           -- AST types (Spanned nodes, all language constructs)
+  parse/mod.rs     -- Chumsky parser → SourceFile
+  desugar.rs       -- Cell → depth-1 Queue, pattern match → decision tree
+  types.rs         -- HM type inference + Cell linearity checking
+  diagnostics.rs   -- Error/warning types + ariadne rendering
+```
 
 ### Provenance System
 
