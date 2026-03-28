@@ -33,16 +33,19 @@ tbn graph                      # Emit process network as DOT/Mermaid
 
 Tourbillon has exactly three constructs:
 
-- **Queue(T, depth=N)** — the only sequential storage element. Bounded, typed, synchronous FIFO.
-- **Cell(T)** — syntactic sugar for depth-1 self-queue with linear-type discipline. Compiles to a register.
-- **Process** — guarded combinational logic with rules that consume/produce queue tokens. Rules fire atomically.
-- **Pipe** — structural composition (wiring only, no logic). Single-writer single-reader enforcement on queues.
+- **Queue(T, depth=N)** — the only sequential storage element. Bounded, typed, synchronous FIFO. Supports `take()`, `put()`, `try_take()`, and `peek()`.
+- **Cell(T)** — syntactic sugar for depth-1 self-queue with linear-type discipline. Supports `peek()` for non-consuming concurrent reads. Compiles to a register.
+- **Process** — guarded combinational logic with rules that consume/produce queue tokens. Rules fire atomically. Port kinds: `consumes:`, `produces:`, `state:`, `peeks:`.
+- **Pipe** — structural composition (wiring only, no logic). Single-writer single-reader invariant at IR level.
+- **Memory(K → V, depth, latency)** — addressable storage. Desugars to request/response queues. Compiler maps to vendor BRAM/SRAM.
+- **Multi-producer arbitration** — `priority = [...]` or `arbitration = round_robin` on queues. Desugars to compiler-generated arbiter process.
+- **Async sources** — `source = async` annotation for external inputs (interrupts, bus interfaces). Compiler generates synchroniser.
 
 ### Compiler Pipeline (7 stages)
 
 1. **Parse** → CST (winnow or chumsky)
 2. **Desugar** → Cells to depth-1 Queues; pattern match to decision trees
-3. **Type Check** → Hindley-Milner + linear-type discipline on Cells
+3. **Type Check** → Hindley-Milner + linear-type discipline on Cells (peek exempt from linearity)
 4. **Elaborate** → Resolve pipes, flatten hierarchy, build process network graph
 5. **Schedule** → Rule priority assignment, conflict detection, shared-Cell arbitration
 6. **Lower** → Process network → structural SystemVerilog (Queue→FIFO module, Cell→reg, rule→always_comb)
@@ -77,8 +80,10 @@ Content-addressed builds using BLAKE3 Merkle trees. The source root hash is embe
 - The DFF is a degenerate queue. Users never see "register" — they see queues they borrow from and return to.
 - Cell linearity: within a rule, if you `take()` a Cell you **must** `put()` exactly once on every control-flow path.
 - Generated SystemVerilog should be flat, boring, and structurally regular — it's a compilation target.
-- The compiler should aggressively collapse depth-1 queues with no contention into bare registers as an optimisation pass (semantic model stays queues; silicon is DFFs where safe).
+- Full FIFO emission for now — register collapse is a future optimisation pass. Do not implement collapse until explicitly requested.
+- Multi-producer syntax is sugar; the IR always has single-writer single-reader queues with arbiter process nodes inserted by the compiler.
+- `peek()` sees the old value when concurrent with `take()`/`put()` in the same cycle (read port sees pre-write-back state).
 
 ## Open Design Questions
 
-See `TOURBILLON.md` §8 for unresolved questions around shared Cell scheduling semantics, memory interface latency modeling, interrupt handling, and area overhead.
+See `TOURBILLON.md` §9 for remaining open questions around multi-writer default policy, peek consistency specification, and memory write interface design.

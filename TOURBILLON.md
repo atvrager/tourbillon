@@ -37,6 +37,9 @@ A `Queue(T, depth = N)` holds up to `N` tokens of type `T`. It exposes two opera
 | `q.put(val)`  | Enqueue `val` at tail                    | Queue full        |
 | `q.take()`    | Dequeue and return head                  | Queue empty       |
 | `q.try_take()`| Non-blocking variant, returns `Option(T)`| Never (returns `None`) |
+| `q.peek()`    | Read head without dequeuing, returns `Option(T)` | Never (returns `None`) |
+
+`peek()` is a non-consuming read — it observes `deq_data` and `deq_valid` without asserting `deq_ready`. It carries no linearity obligation and may execute concurrently with other operations on the same queue.
 
 Queues are **typed**, **bounded**, and **synchronous** (one put and one take may occur per clock cycle per queue).
 
@@ -49,6 +52,8 @@ state: pc : Cell(Addr, init = 0x8000_0000)
 ```
 
 A `Cell(T)` desugars to a depth-1 self-queue. Within a single rule, you **must** `take()` before `put()`, and you **must** `put()` exactly once if you `take()`. The compiler enforces this via a linear-type discipline — a Cell is a borrowed resource.
+
+A Cell also supports `peek()` — a non-consuming read that observes the current value without borrowing it. `peek()` carries no linearity obligation and may execute concurrently with a `take()`/`put()` pair from another rule. This enables the common pattern of reading state (e.g. a register file for operand fetch) while another process mutates it (e.g. writeback).
 
 At the SystemVerilog level, a Cell compiles to a register. But the programmer never sees the word "register" — they see a queue they borrow from and return to.
 
@@ -83,6 +88,50 @@ pipe CPU:
 ```
 
 A pipe declares queues and binds them to process ports. The compiler checks that every queue has exactly one producer and one consumer (single-writer, single-reader), and that the element types match.
+
+#### Multi-Producer Arbitration
+
+The single-writer, single-reader invariant holds at the IR level. When multiple processes need to write to the same logical queue (e.g. a Common Data Bus in an out-of-order processor), the programmer annotates a multi-producer binding and the compiler desugars it into an arbiter process:
+
+```
+let cdb = Queue(Result, depth = 1, priority = [load_unit, alu, fp_unit])
+```
+
+Or with fair arbitration:
+
+```
+let cdb = Queue(Result, depth = 1, arbitration = round_robin)
+```
+
+The compiler generates an arbiter process node that consumes from N per-producer queues and produces to the single output queue. The IR remains single-writer, single-reader throughout — the sugar is structural, not semantic.
+
+#### Memory
+
+A built-in primitive for addressable storage with latency:
+
+```
+let imem = Memory(Addr → Word, depth = 4096, latency = 1)
+```
+
+`Memory(K → V, depth, latency)` desugars to a request queue, a response queue, and an internal process modeling read/write latency. Processes interact with memory through queue operations — sending addresses on the request channel and receiving data on the response channel.
+
+The `latency` parameter informs the deadlock analyser. During SV lowering, the compiler may map `Memory` nodes to vendor BRAM/SRAM primitives (Xilinx, Intel) instead of emitting FIFO-wrapped logic.
+
+#### Asynchronous External Sources
+
+Queues whose producer lives outside the Tourbillon process network (e.g. interrupt lines, external bus interfaces) are annotated with `source = async`:
+
+```
+external irq : Queue(IrqId, depth = 1, source = async)
+```
+
+The compiler generates a clock-domain synchroniser (two-FF by default) in the SV output. From the process network's perspective, an async queue is a non-deterministic token source — the deadlock analyser treats it as "tokens may or may not appear."
+
+Priority encoding across multiple asynchronous sources uses the same arbiter desugaring:
+
+```
+let irq_mux = Queue(IrqId, depth = 1, priority = [nmi, timer, external])
+```
 
 ### 2.2 Type System
 
@@ -182,11 +231,11 @@ process Fetch
 process Decode
   consumes: fetch_in   : Queue(Addr × Word)
   produces: decode_out : Queue(Decoded)
-  state:    regfile    : Cell(Array(32, Word), init = zeroes)
+  peeks:    regfile    : Cell(Array(32, Word))
 
   rule crack:
     let (pc, raw) = fetch_in.take()
-    let regs = regfile.take()
+    let regs = regfile.peek()
     let d = decode_rv32i(raw)
     decode_out.put(Decoded {
       op      = d.op,
@@ -198,7 +247,6 @@ process Decode
       mem     = d.mem,
       wb      = d.wb,
     })
-    regfile.put(regs)
 
 -- ============================================
 -- EXECUTE
@@ -229,7 +277,7 @@ process Execute
 -- ============================================
 process Writeback
   consumes: wb_in   : Queue(RegIdx × Word)
-  accesses: regfile : Cell(Array(32, Word))
+  state:    regfile : Cell(Array(32, Word), init = zeroes)
 
   rule commit:
     let (rd, val) = wb_in.take()
@@ -247,9 +295,9 @@ pipe CPU:
   let wb_q     = Queue(RegIdx × Word, depth = 2)
 
   Fetch     { fetch_out = fetch_q, redirect = redir_q }
-  Decode    { fetch_in  = fetch_q, decode_out = decode_q }
+  Decode    { fetch_in  = fetch_q, decode_out = decode_q, regfile = Writeback.regfile }
   Execute   { exec_in   = decode_q, redirect = redir_q, writeback = wb_q }
-  Writeback { wb_in     = wb_q, regfile = Decode.regfile }
+  Writeback { wb_in     = wb_q }
 ```
 
 ### 3.1 What the Compiler Produces
@@ -477,21 +525,29 @@ tbn init <name>                 Scaffold a new Tourbillon project
 
 ---
 
-## 8. Open Questions
+## 8. Design Decisions (Resolved)
 
-1. **Shared Cell semantics.** The RV32I design has `regfile` accessed by both Decode and Writeback. The current design uses `accesses:` as a port annotation, but the scheduling semantics need to be precise — does Writeback have priority? Is it round-robin? Bluespec uses urgency annotations; Tourbillon might infer from pipeline topology.
+1. **Shared Cell semantics.** Resolved via `peek()` — a non-consuming read with no linearity obligation. Processes that only need to read a Cell (e.g. Decode reading the register file) use `peek()` and declare the port as `peeks:`. Processes that mutate a Cell use `take()`/`put()` with exclusive linear access. `peek()` and `take()`/`put()` may execute concurrently on the same Cell in the same cycle. No priority annotations needed for the read-alongside-write case.
 
-2. **Memory interfaces.** `imem_read` and `dmem_read` in the reference design are hand-waved as combinational. Real memory has latency. The natural Tourbillon answer is: memory responses come back on a queue, turning fetch into a split-transaction process. This is cleaner but changes the pipeline structure.
+2. **Memory interfaces.** Resolved via the `Memory(K → V, depth, latency)` primitive. Desugars to request/response queues with an internal latency-modeling process. The compiler maps Memory nodes to vendor BRAM/SRAM during SV lowering. The `latency` parameter informs deadlock analysis. The RV32I reference design should be updated to use split-transaction memory access as a Phase 2 deliverable.
 
-3. **Interrupt handling.** Interrupts are fundamentally non-queue-like — they're asynchronous, edge-triggered, priority-encoded. Tourbillon needs an escape hatch or a principled "async event → token injection" model.
+3. **Interrupt handling.** Resolved via `source = async` queue annotation. Asynchronous external sources are modeled as queues whose producer is outside the process network. The compiler generates a clock-domain synchroniser in SV. Priority across multiple interrupt sources uses the same multi-producer arbiter desugaring as any other N-to-1 contention. Inevitable synchronisation latency is accepted — Tourbillon is not targeting hard-real-time control systems out of the box.
 
-4. **Area overhead.** A depth-2 FIFO with handshake logic is heavier than a pipeline register. The compiler should aggressively collapse depth-1 queues with no contention into bare registers as an optimisation pass. The semantic model stays queues; the silicon is DFFs where safe.
+4. **Area overhead.** Full FIFO emission (Level 3) for the foreseeable future. Register collapse is a future optimisation pass. The semantic model is queues everywhere; the silicon will initially also be FIFOs everywhere. When the optimiser is eventually implemented, it will operate at multiple levels of aggression (bare register for depth-1 no-contention, register + valid bit for provably-single-occupancy, full FIFO otherwise), controlled by a compiler flag.
 
-5. **Provenance in ASIC flows.** FPGA verification over JTAG/UART is clean. For ASIC tape-out, the provenance hash would live in a ROM or fuse block. The `tbn verify` story needs adaptation for post-silicon bring-up.
+5. **Provenance in ASIC flows.** Deferred. FPGA verification over JTAG/UART is the near-term story. ASIC tape-out provenance (ROM, fuse block, eFuse) will be designed when an ASIC target is in scope.
+
+## 9. Remaining Open Questions
+
+1. **Multi-writer contention policy defaults.** The arbiter desugaring supports `priority = [...]` and `arbitration = round_robin`. Should there be a default policy when the user doesn't specify one, or should the compiler require an explicit annotation? Leaning toward requiring explicit — silent priority choices are a bug factory.
+
+2. **Peek consistency model.** When a `peek()` and a `take()`/`put()` occur on the same Cell in the same cycle, does `peek()` see the old value or the new value? Hardware answer: old value (read port sees pre-write-back state). This should be specified and enforced.
+
+3. **Memory write interface.** The `Memory` primitive needs a clear write path. Options: separate read/write request queues, or a single request queue with a `ReadWrite` sum type. The latter is simpler; the former maps more naturally to dual-port BRAM.
 
 ---
 
-## 9. Roadmap
+## 10. Roadmap
 
 | Phase | Deliverable | Scope |
 |---|---|---|
