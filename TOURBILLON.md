@@ -55,6 +55,8 @@ A `Cell(T)` desugars to a depth-1 self-queue. Within a single rule, you **must**
 
 A Cell also supports `peek()` — a non-consuming read that observes the current value without borrowing it. `peek()` carries no linearity obligation and may execute concurrently with a `take()`/`put()` pair from another rule. This enables the common pattern of reading state (e.g. a register file for operand fetch) while another process mutates it (e.g. writeback).
 
+**Peek consistency:** when `peek()` and `take()`/`put()` occur on the same Cell in the same cycle, `peek()` always sees the **old value** (pre-write-back state). This matches hardware register file semantics — the read port returns the value from the previous clock edge. If forwarding is needed, the designer wires it explicitly through a queue.
+
 At the SystemVerilog level, a Cell compiles to a register. But the programmer never sees the word "register" — they see a queue they borrow from and return to.
 
 #### Process
@@ -105,6 +107,8 @@ let cdb = Queue(Result, depth = 1, arbitration = round_robin)
 
 The compiler generates an arbiter process node that consumes from N per-producer queues and produces to the single output queue. The IR remains single-writer, single-reader throughout — the sugar is structural, not semantic.
 
+The compiler **requires** an explicit `priority` or `arbitration` annotation when multiple producers target one queue. There is no default policy — unannotated multi-producer queues are a compile error. Silent priority choices are a bug factory.
+
 #### Memory
 
 A built-in primitive for addressable storage with latency:
@@ -113,7 +117,19 @@ A built-in primitive for addressable storage with latency:
 let imem = Memory(Addr → Word, depth = 4096, latency = 1)
 ```
 
-`Memory(K → V, depth, latency)` desugars to a request queue, a response queue, and an internal process modeling read/write latency. Processes interact with memory through queue operations — sending addresses on the request channel and receiving data on the response channel.
+`Memory(K → V, depth, latency)` desugars to separate read and write port queues, plus an internal process modeling read latency:
+
+```
+-- Given:
+let imem = Memory(Addr → Word, depth = 4096, latency = 1)
+
+-- Desugars to:
+-- imem.read_req  : Queue(Addr)         -- send read address
+-- imem.read_resp : Queue(Word)         -- receive read data (after `latency` cycles)
+-- imem.write_req : Queue(Addr × Word)  -- send write address + data (fire-and-forget)
+```
+
+Separate read/write ports map directly to dual-port BRAM (port A reads, port B writes). Reads and writes may occur in the same cycle. Writes are fire-and-forget — no response token.
 
 The `latency` parameter informs the deadlock analyser. During SV lowering, the compiler may map `Memory` nodes to vendor BRAM/SRAM primitives (Xilinx, Intel) instead of emitting FIFO-wrapped logic.
 
@@ -537,17 +553,9 @@ tbn init <name>                 Scaffold a new Tourbillon project
 
 5. **Provenance in ASIC flows.** Deferred. FPGA verification over JTAG/UART is the near-term story. ASIC tape-out provenance (ROM, fuse block, eFuse) will be designed when an ASIC target is in scope.
 
-## 9. Remaining Open Questions
-
-1. **Multi-writer contention policy defaults.** The arbiter desugaring supports `priority = [...]` and `arbitration = round_robin`. Should there be a default policy when the user doesn't specify one, or should the compiler require an explicit annotation? Leaning toward requiring explicit — silent priority choices are a bug factory.
-
-2. **Peek consistency model.** When a `peek()` and a `take()`/`put()` occur on the same Cell in the same cycle, does `peek()` see the old value or the new value? Hardware answer: old value (read port sees pre-write-back state). This should be specified and enforced.
-
-3. **Memory write interface.** The `Memory` primitive needs a clear write path. Options: separate read/write request queues, or a single request queue with a `ReadWrite` sum type. The latter is simpler; the former maps more naturally to dual-port BRAM.
-
 ---
 
-## 10. Roadmap
+## 9. Roadmap
 
 | Phase | Deliverable | Scope |
 |---|---|---|

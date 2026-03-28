@@ -84,6 +84,8 @@ Content-addressed builds using BLAKE3 Merkle trees. The source root hash is embe
 - Multi-producer syntax is sugar; the IR always has single-writer single-reader queues with arbiter process nodes inserted by the compiler.
 - `peek()` sees the old value when concurrent with `take()`/`put()` in the same cycle (read port sees pre-write-back state).
 
-## Open Design Questions
+## Key Semantic Rules
 
-See `TOURBILLON.md` §9 for remaining open questions around multi-writer default policy, peek consistency specification, and memory write interface design.
+- Multi-producer queues **require** explicit `priority` or `arbitration` annotation. No defaults — unannotated multi-producer is a compile error.
+- `peek()` always sees the **old value** (pre-write-back state) when concurrent with `take()`/`put()` in the same cycle.
+- `Memory` has separate read/write port queues (`read_req`, `read_resp`, `write_req`). Writes are fire-and-forget. Maps to dual-port BRAM.
