@@ -4,11 +4,12 @@ pub mod diagnostics;
 pub mod elaborate;
 pub mod ir;
 pub mod parse;
+pub mod schedule;
 pub mod types;
 
 use diagnostics::{Errors, report_errors};
 
-/// Run the pipeline: parse → desugar → type-check → elaborate.
+/// Run the pipeline: parse → desugar → type-check → elaborate → schedule.
 pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
     let (cst, parse_errors) = parse::parse(src);
 
@@ -39,12 +40,22 @@ pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
         });
     }
 
-    let (_networks, elab_errors) = elaborate::elaborate(&ast, &type_env);
+    let (networks, elab_errors) = elaborate::elaborate(&ast, &type_env);
     if !elab_errors.is_empty() {
         report_errors(src, filename, &elab_errors);
         return Err(Errors {
             diagnostics: elab_errors,
         });
+    }
+
+    for network in networks {
+        let (_scheduled, sched_diags) = schedule::schedule(network);
+        if !sched_diags.is_empty() {
+            report_errors(src, filename, &sched_diags);
+            return Err(Errors {
+                diagnostics: sched_diags,
+            });
+        }
     }
 
     Ok(())
