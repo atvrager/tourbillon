@@ -288,6 +288,7 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
                             if val_ty != Ty::Error
                                 && *expected_ty != Ty::Error
                                 && val_ty != *expected_ty
+                                && !both_bits(&val_ty, expected_ty)
                             {
                                 diagnostics.push(Diagnostic::error(
                                     field_val.span.clone(),
@@ -389,6 +390,7 @@ pub fn check_stmt(stmt: &Spanned<Stmt>, env: &mut TypeEnv, diagnostics: &mut Vec
                     && !contains_error(&val_ty)
                     && !contains_error(&expected)
                     && val_ty != expected
+                    && !both_bits(&val_ty, &expected)
                 {
                     diagnostics.push(Diagnostic::error(
                         value.span.clone(),

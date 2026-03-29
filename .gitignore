@@ -28,6 +28,8 @@ target
 # Verilator build artifacts
 sim/obj_dir/
 sim/sv_out/
+sim/soc_obj_dir/
+sim/soc_sv_out/
 sim/*.vcd
 sim/*.fst
 sim/tests/rv32ui/

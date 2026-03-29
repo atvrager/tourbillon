@@ -878,14 +878,17 @@ impl<'a> SvEmitter<'a> {
                 continue;
             }
 
-            // Sync FIFO
+            // Sync FIFO — use domain clock if both endpoints are in the same domain
+            let (fifo_src, _fifo_dst) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
+            let fifo_clk = self.clock_for_instance(&self.net.network.graph[fifo_src].instance_name);
+            let fifo_rst = self.reset_for_instance(&self.net.network.graph[fifo_src].instance_name);
             self.line(&format!(
                 "tbn_fifo #(.WIDTH({w}), .DEPTH({})) q_{sname}_inst (",
                 edge.depth
             ));
             self.indent();
-            self.line(".clk(clk),");
-            self.line(".rst_n(rst_n),");
+            self.line(&format!(".clk({fifo_clk}),"));
+            self.line(&format!(".rst_n({fifo_rst}),"));
             self.line(&format!(".enq_valid(q_{sname}_enq_valid),"));
             self.line(&format!(".enq_ready(q_{sname}_enq_ready),"));
             self.line(&format!(".enq_data(q_{sname}_enq_data),"));
@@ -913,12 +916,11 @@ impl<'a> SvEmitter<'a> {
                 continue;
             }
             let sname = sanitize(&edge.name);
-            let w = bit_width(&edge.elem_ty);
-            let wd = width_decl(w);
+            let td = sv_type_decl(&edge.elem_ty);
 
             self.line(&format!("// Cell: {}", edge.name));
-            self.line(&format!("logic {wd}c_{sname}_q;"));
-            self.line(&format!("logic {wd}c_{sname}_d;"));
+            self.line(&format!("{td}c_{sname}_q;"));
+            self.line(&format!("{td}c_{sname}_d;"));
             self.line(&format!("logic c_{sname}_en;"));
             self.blank();
         }

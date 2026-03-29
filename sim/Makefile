@@ -18,7 +18,12 @@ TEST ?= tests/smoke.bin
 # riscv-tests location
 RISCV_TESTS_DIR ?= /opt/riscv-tests/share/riscv-tests/isa
 
+SOC_SV_DIR ?= soc_sv_out
+SOC_OBJ_DIR := soc_obj_dir
+SOC_BIN     := $(SOC_OBJ_DIR)/sim_soc
+
 .PHONY: sv verilate build run test-smoke test-hex riscv-tests clean
+.PHONY: soc-sv soc-build soc-hello soc-riscv-tests
 
 # Generate SystemVerilog from Tourbillon source
 sv:
@@ -82,7 +87,58 @@ riscv-tests: build
 	echo "Results: $$pass passed, $$fail failed, $$skip skipped"; \
 	test $$fail -eq 0
 
+# =========================================================================
+# Marie Antoinette SoC targets
+# =========================================================================
+
+# Generate SoC SystemVerilog
+soc-sv:
+	mkdir -p $(SOC_SV_DIR)
+	$(TBN) build ../examples/marie.tbn -o $(SOC_SV_DIR)
+
+# Build SoC simulator
+soc-build: soc-sv
+	$(VERILATOR) --cc --exe --build --trace-fst -Wall -Wno-fatal \
+		--top-module soc_top \
+		--public-flat-rw \
+		-j $(NPROC) \
+		-I$(SOC_SV_DIR) \
+		soc_top.sv rv32i_pkg.sv mem_model.sv \
+		$(SOC_SV_DIR)/*.sv \
+		soc_tb.cpp \
+		-o sim_soc \
+		--Mdir $(SOC_OBJ_DIR)
+
+# Build and run Hello World test
+tests/hello.elf: tests/hello.S
+	$(AS) -march=rv32i -mabi=ilp32 -o tests/hello.o tests/hello.S
+	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/hello.elf tests/hello.o
+	@rm -f tests/hello.o
+
+soc-hello: soc-build tests/hello.elf
+	$(SOC_BIN) tests/hello.elf
+
+# Run riscv-tests through the SoC fabric
+soc-riscv-tests: soc-build
+	@pass=0; fail=0; skip=0; \
+	for t in $(RV32UI_DIR)/*; do \
+		test -f "$$t" || continue; \
+		case "$$t" in *.dump|*.S|*.o) continue;; *fence_i*) skip=$$((skip + 1)); continue;; esac; \
+		name=$$(basename $$t); \
+		if $(SOC_BIN) $$t 2>/dev/null; then \
+			echo "  PASS $$name"; \
+			pass=$$((pass + 1)); \
+		else \
+			echo "  FAIL $$name"; \
+			fail=$$((fail + 1)); \
+		fi; \
+	done; \
+	echo ""; \
+	echo "SoC Results: $$pass passed, $$fail failed, $$skip skipped"; \
+	test $$fail -eq 0
+
 # Remove build artifacts
 clean:
-	rm -rf $(OBJ_DIR) $(SV_DIR) tests/*.bin tests/*.o tests/*.elf
-	rm -f sim_trace.vcd sim_trace.fst
+	rm -rf $(OBJ_DIR) $(SV_DIR) $(SOC_OBJ_DIR) $(SOC_SV_DIR)
+	rm -f tests/*.bin tests/*.o tests/*.elf
+	rm -f sim_trace.vcd sim_trace.fst soc_trace.fst
