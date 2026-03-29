@@ -501,9 +501,9 @@ The compiler is implemented in Rust. The pipeline is:
 | Parsing | `chumsky` 1.0-alpha (error recovery) | In use |
 | Diagnostics | `ariadne` 0.5 (span-highlighted errors) | In use |
 | CLI | `clap` 4 (derive) | In use |
-| Type checking | Custom, structured after `rustc`'s trait solver patterns | Planned |
-| IR | `petgraph` for the process network graph | Planned |
-| SV emission | `askama` templates or direct `Write` | Planned |
+| Type checking | Custom (Hindley-Milner + linearity) | In use |
+| IR | `petgraph` 0.7 for the process network graph | In use |
+| SV emission | `std::fmt::Write` (direct string building) | In use |
 | Hashing | `blake3` | Planned |
 | Build cache | `cacache` (content-addressable, Nix-like) | Planned |
 | JTAG/UART | `serialport` for verify; `probe-rs` for JTAG | Planned |
@@ -580,7 +580,7 @@ tbn init <name>                 Scaffold a new Tourbillon project
 | Phase | Deliverable | Scope | Status |
 |---|---|---|---|
 | **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output | **Complete** — lexer, parser, desugaring, type checker, linearity checker |
-| **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | Planned |
+| **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | **In progress** — Stages 1–6 complete (`tbn build` produces SV); Stage 7 (provenance) not yet implemented |
 | **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | Planned |
 | **3 — Verify** | `tbn status` / `tbn verify` over UART/JTAG | Provenance chain to running FPGA | Planned |
 | **4 — Formal** | mCRL2 export + deadlock checker | Verification story | Planned |

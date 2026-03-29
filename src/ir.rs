@@ -47,5 +47,8 @@ pub struct QueueEdge {
 #[derive(Debug)]
 pub enum QueueEdgeKind {
     Queue,
-    Cell { peeker_instances: Vec<String> },
+    Cell {
+        peeker_instances: Vec<String>,
+        init: Option<u64>,
+    },
 }

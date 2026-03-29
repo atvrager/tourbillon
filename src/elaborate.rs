@@ -52,6 +52,23 @@ fn parse_dotted_target(target: &str) -> Option<(&str, &str)> {
     Some((&target[..dot], &target[dot + 1..]))
 }
 
+/// Extract the init literal value from a Cell type expression.
+fn extract_init_value(ty_expr: &TypeExpr) -> Option<u64> {
+    if let TypeExpr::Cell {
+        init: Some(init_expr),
+        ..
+    } = ty_expr
+    {
+        match &init_expr.node {
+            Expr::Lit(Literal::Int(n)) => Some(*n),
+            Expr::Lit(Literal::Bool(b)) => Some(if *b { 1 } else { 0 }),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
 /// Extract the element type from a Queue or Cell type.
 fn port_element_type(ty: &Ty) -> Option<Ty> {
     match ty {
@@ -278,6 +295,7 @@ fn elaborate_pipe(
                     if let Some(edge) = graph.edge_weight_mut(pending.edge_idx)
                         && let QueueEdgeKind::Cell {
                             ref mut peeker_instances,
+                            ..
                         } = edge.kind
                     {
                         peeker_instances.push(instance_name.clone());
@@ -366,6 +384,7 @@ fn elaborate_pipe(
                     if let Some(edge) = graph.edge_weight_mut(pending.edge_idx)
                         && let QueueEdgeKind::Cell {
                             ref mut peeker_instances,
+                            ..
                         } = edge.kind
                     {
                         peeker_instances.push(instance_name.clone());
@@ -387,12 +406,14 @@ fn elaborate_pipe(
                 let elem_ty = port_element_type(&port_ty).unwrap_or(port_ty.clone());
 
                 let self_loop_name = format!("{instance_name}.{}", port_def.name.node);
+                let init = extract_init_value(&port_def.ty.node);
                 let edge = QueueEdge {
                     name: self_loop_name.clone(),
                     elem_ty,
                     depth: 1,
                     kind: QueueEdgeKind::Cell {
                         peeker_instances: vec![],
+                        init,
                     },
                     span: port_def.name.span.clone(),
                 };
@@ -662,6 +683,7 @@ pipe Top {
         let edge_data = &net.graph[edge];
         if let QueueEdgeKind::Cell {
             ref peeker_instances,
+            ..
         } = edge_data.kind
         {
             assert_eq!(peeker_instances, &["Reader"]);

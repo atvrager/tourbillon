@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0 complete (lexer, parser, desugaring, type checker, linearity). Phase 1 in progress — elaboration (Stage 4) implemented. `TOURBILLON.md` is the authoritative specification.
+**Status:** Phase 0 complete. Phase 1 complete through Stage 6 (lowering): parse → desugar → type-check → elaborate → schedule → lower. `tbn build` produces synthesisable SystemVerilog. Provenance (Stage 7) not yet implemented. `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -28,6 +28,7 @@ cargo fmt --check              # Check formatting
 CLI usage:
 ```
 tbn check <file.tbn>           # Type-check and deadlock analysis (no codegen)
+tbn build <file.tbn> -o <dir>  # Compile to SystemVerilog (.sv files)
 ```
 
 ## Git Hooks
@@ -78,7 +79,7 @@ This graph enables deadlock analysis (Petri net / KPN capacity checks), rule con
 | Diagnostics | `ariadne` 0.5 | 0 |
 | CLI | `clap` 4 (derive) | 0 |
 | IR graph | `petgraph` 0.7 | 1 |
-| SV emission | `askama` or direct `Write` | 1+ |
+| SV emission | `std::fmt::Write` (direct string building) | 1 |
 | Hashing | `blake3` | 1+ |
 | Build cache | `cacache` | 1+ |
 
@@ -86,11 +87,13 @@ This graph enables deadlock analysis (Petri net / KPN capacity checks), rule con
 
 ```
 src/
-  main.rs            -- CLI (clap): tbn check <file>
-  lib.rs             -- Pipeline: parse → desugar → type-check → elaborate
+  main.rs            -- CLI (clap): tbn check / tbn build
+  lib.rs             -- Pipeline: parse → desugar → type-check → elaborate → schedule → lower
   ast.rs             -- AST types (Spanned nodes, all language constructs)
   ir.rs              -- IR types: ProcessNetwork, ProcessNode, QueueEdge, ResolvedPort
   elaborate.rs       -- Elaboration pass: AST pipes → petgraph process networks
+  schedule.rs        -- Rule priority assignment, conflict detection
+  lower.rs           -- SV emitter: process network → SystemVerilog
   parse/
     mod.rs           -- Orchestrates lexer → parser, converts errors
     token.rs         -- Token enum (keywords, operators, punctuation)
@@ -109,6 +112,8 @@ tests/
   process.rs         -- Process + rule integration tests
   linearity.rs       -- Cell linearity error tests
   elaborate.rs       -- Elaboration integration tests
+  schedule.rs        -- Schedule integration tests
+  lower.rs           -- Lowering / SV codegen integration tests
 ```
 
 ### Provenance System
