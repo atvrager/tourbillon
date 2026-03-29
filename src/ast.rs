@@ -80,7 +80,10 @@ pub enum TypeExpr {
         depth: Option<u64>,
     },
     /// Cell type: `Cell(T, init = expr)`
-    Cell { elem: Box<Spanned<TypeExpr>> },
+    Cell {
+        elem: Box<Spanned<TypeExpr>>,
+        init: Option<Box<Spanned<Expr>>>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -133,12 +136,12 @@ pub enum Stmt {
     },
     /// Expression used as statement
     Expr(Spanned<Expr>),
-    /// `match expr: ...`
+    /// `match expr { arms }`
     Match {
         scrutinee: Spanned<Expr>,
         arms: Vec<MatchArm>,
     },
-    /// `if cond then stmts [else stmts]`
+    /// `if cond { stmts } [else { stmts }]`
     If {
         cond: Spanned<Expr>,
         then_body: Vec<Spanned<Stmt>>,
@@ -198,16 +201,18 @@ pub enum Expr {
         name: String,
         fields: Vec<(Spanned<String>, Spanned<Expr>)>,
     },
-    /// `queue.take()`
+    /// `receiver.method(args)` — resolved during desugaring
+    MethodCall {
+        receiver: Box<Spanned<Expr>>,
+        method: Spanned<String>,
+        args: Vec<Spanned<Expr>>,
+    },
+    /// `queue.take()` — produced by desugaring
     Take { queue: String },
-    /// `queue.try_take()`
+    /// `queue.try_take()` — produced by desugaring
     TryTake { queue: String },
-    /// `queue.peek()`
+    /// `queue.peek()` — produced by desugaring
     Peek { queue: String },
-    /// `cell.take()`
-    CellTake { cell: String },
-    /// `cell.peek()`
-    CellPeek { cell: String },
     /// Function/built-in call: `alu(op, a, b, imm)`
     Call {
         func: String,
@@ -248,6 +253,8 @@ pub enum BinOp {
     Gt,
     Le,
     Ge,
+    LogicalAnd,
+    LogicalOr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -64,14 +64,16 @@ At the SystemVerilog level, a Cell compiles to a register. But the programmer ne
 A block of guarded combinational logic that consumes from input queues and produces to output queues.
 
 ```
-process Fetch
+process Fetch {
   consumes: redirect  : Queue(Addr, depth = 1)
   produces: fetch_out : Queue(Addr × Word)
   state:    pc        : Cell(Addr, init = 0x8000_0000)
 
-  rule tick:
+  rule tick {
     -- body: sequential-looking code
     -- compiles to combinational logic + enable signals
+  }
+}
 ```
 
 A process may contain one or more **rules**. A rule fires atomically when all its guard conditions are satisfied (all input queues it reads from are non-empty; all output queues it writes to are not full). Rules within a process are mutually exclusive per cycle unless the compiler can prove they don't conflict.
@@ -81,12 +83,13 @@ A process may contain one or more **rules**. A rule fires atomically when all it
 Structural composition. No logic — just wiring.
 
 ```
-pipe CPU:
+pipe CPU {
   let fetch_q  = Queue(Addr × Word, depth = 2)
   let decode_q = Queue(Decoded, depth = 2)
   -- ...
   Fetch    { fetch_out = fetch_q, redirect = redir_q }
   Decode   { fetch_in  = fetch_q, decode_out = decode_q }
+}
 ```
 
 A pipe declares queues and binds them to process ports. The compiler checks that every queue has exactly one producer and one consumer (single-writer, single-reader), and that the element types match.
@@ -161,14 +164,14 @@ type Addr   = Bits 32
 type RegIdx = Bits 5
 
 record Decoded {
-  op      : AluOp,
-  rd      : RegIdx,
-  rs1_val : Word,
-  rs2_val : Word,
-  imm     : Word,
-  pc      : Addr,
-  mem     : MemOp,
-  wb      : Bool,
+  op      : AluOp
+  rd      : RegIdx
+  rs1_val : Word
+  rs2_val : Word
+  imm     : Word
+  pc      : Addr
+  mem     : MemOp
+  wb      : Bool
 }
 
 enum MemOp = Load | Store | None
@@ -187,11 +190,12 @@ The type checker enforces that within any rule:
 This prevents the two most common register-level bugs: forgetting to update state, and accidentally overwriting state with stale values.
 
 ```
-rule crack:
+rule crack {
   let regs = regfile.take()
   -- ... use regs ...
   -- COMPILE ERROR if you forget this line:
   regfile.put(regs)
+}
 ```
 
 #### Queue Protocol Types (Stretch Goal)
@@ -228,28 +232,31 @@ A complete in-order RV32I core expressed in Tourbillon. This is both the languag
 -- ============================================
 -- FETCH
 -- ============================================
-process Fetch
+process Fetch {
   consumes: redirect   : Queue(Addr, depth = 1)
   produces: fetch_out  : Queue(Addr × Word)
   state:    pc         : Cell(Addr, init = 0x8000_0000)
 
-  rule tick:
+  rule tick {
     let current_pc = pc.take()
     let instr = imem_read(current_pc)
     fetch_out.put((current_pc, instr))
-    match redirect.try_take():
+    match redirect.try_take() {
       Some(target) => pc.put(target)
       None         => pc.put(current_pc + 4)
+    }
+  }
+}
 
 -- ============================================
 -- DECODE
 -- ============================================
-process Decode
+process Decode {
   consumes: fetch_in   : Queue(Addr × Word)
   produces: decode_out : Queue(Decoded)
   peeks:    regfile    : Cell(Array(32, Word))
 
-  rule crack:
+  rule crack {
     let (pc, raw) = fetch_in.take()
     let regs = regfile.peek()
     let d = decode_rv32i(raw)
@@ -263,48 +270,59 @@ process Decode
       mem     = d.mem,
       wb      = d.wb,
     })
+  }
+}
 
 -- ============================================
 -- EXECUTE
 -- ============================================
-process Execute
+process Execute {
   consumes: exec_in   : Queue(Decoded)
   produces: redirect  : Queue(Addr, depth = 1)
             writeback : Queue(RegIdx × Word)
 
-  rule go:
+  rule go {
     let d = exec_in.take()
     let alu_out = alu(d.op, d.rs1_val, d.rs2_val, d.imm)
 
-    match d.mem:
-      Load  =>
+    match d.mem {
+      Load  => {
         let val = dmem_read(alu_out)
-        if d.wb then writeback.put((d.rd, val))
-      Store =>
+        if d.wb { writeback.put((d.rd, val)) }
+      }
+      Store => {
         dmem_write(alu_out, d.rs2_val)
-      None  =>
-        if d.wb then writeback.put((d.rd, alu_out))
+      }
+      None  => {
+        if d.wb { writeback.put((d.rd, alu_out)) }
+      }
+    }
 
-    if is_branch(d.op) && branch_taken(d.op, d.rs1_val, d.rs2_val):
+    if is_branch(d.op) && branch_taken(d.op, d.rs1_val, d.rs2_val) {
       redirect.put(alu_out)
+    }
+  }
+}
 
 -- ============================================
 -- WRITEBACK
 -- ============================================
-process Writeback
+process Writeback {
   consumes: wb_in   : Queue(RegIdx × Word)
   state:    regfile : Cell(Array(32, Word), init = zeroes)
 
-  rule commit:
+  rule commit {
     let (rd, val) = wb_in.take()
     let regs = regfile.take()
-    let regs' = if rd != 0 then regs[rd := val] else regs
+    let regs' = if rd != 0 { regs[rd := val] } else { regs }
     regfile.put(regs')
+  }
+}
 
 -- ============================================
 -- TOP-LEVEL
 -- ============================================
-pipe CPU:
+pipe CPU {
   let fetch_q  = Queue(Addr × Word, depth = 2)
   let decode_q = Queue(Decoded, depth = 2)
   let redir_q  = Queue(Addr, depth = 1)
@@ -314,6 +332,7 @@ pipe CPU:
   Decode    { fetch_in  = fetch_q, decode_out = decode_q, regfile = Writeback.regfile }
   Execute   { exec_in   = decode_q, redirect = redir_q, writeback = wb_q }
   Writeback { wb_in     = wb_q }
+}
 ```
 
 ### 3.1 What the Compiler Produces
@@ -560,7 +579,7 @@ tbn init <name>                 Scaffold a new Tourbillon project
 
 | Phase | Deliverable | Scope | Status |
 |---|---|---|---|
-| **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output | **In progress** — project scaffolded, stubs in place |
+| **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output | **Complete** — lexer, parser, desugaring, type checker, linearity checker |
 | **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | Planned |
 | **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | Planned |
 | **3 — Verify** | `tbn status` / `tbn verify` over UART/JTAG | Provenance chain to running FPGA | Planned |

@@ -1,0 +1,137 @@
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Token<'src> {
+    // Keywords
+    Process,
+    Pipe,
+    Type,
+    Record,
+    Enum,
+    Rule,
+    Let,
+    Match,
+    If,
+    Then,
+    Else,
+    Consumes,
+    Produces,
+    State,
+    Peeks,
+    External,
+    Queue,
+    Cell,
+    Memory,
+    SomeKw,
+    NoneKw,
+    True,
+    False,
+    Init,
+    Depth,
+
+    // Literals / identifiers
+    Ident(&'src str),
+    Int(u64),
+
+    // Operators
+    Plus,
+    Minus,
+    Star,
+    Ampersand,
+    Pipe_,
+    Caret,
+    Bang,
+    Eq,
+    Neq,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Shl,
+    Shr,
+    LogicalAnd,
+    LogicalOr,
+
+    // Punctuation
+    Times,      // ×
+    Dot,        // .
+    Colon,      // :
+    Assign,     // =
+    Arrow,      // =>
+    ColonEq,    // :=
+    Comma,      // ,
+    Underscore, // _
+
+    // Delimiters
+    LParen,
+    RParen,
+    LBrack,
+    RBrack,
+    LBrace,
+    RBrace,
+}
+
+impl fmt::Display for Token<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Token::Process => write!(f, "process"),
+            Token::Pipe => write!(f, "pipe"),
+            Token::Type => write!(f, "type"),
+            Token::Record => write!(f, "record"),
+            Token::Enum => write!(f, "enum"),
+            Token::Rule => write!(f, "rule"),
+            Token::Let => write!(f, "let"),
+            Token::Match => write!(f, "match"),
+            Token::If => write!(f, "if"),
+            Token::Then => write!(f, "then"),
+            Token::Else => write!(f, "else"),
+            Token::Consumes => write!(f, "consumes"),
+            Token::Produces => write!(f, "produces"),
+            Token::State => write!(f, "state"),
+            Token::Peeks => write!(f, "peeks"),
+            Token::External => write!(f, "external"),
+            Token::Queue => write!(f, "Queue"),
+            Token::Cell => write!(f, "Cell"),
+            Token::Memory => write!(f, "Memory"),
+            Token::SomeKw => write!(f, "Some"),
+            Token::NoneKw => write!(f, "None"),
+            Token::True => write!(f, "true"),
+            Token::False => write!(f, "false"),
+            Token::Init => write!(f, "init"),
+            Token::Depth => write!(f, "depth"),
+            Token::Ident(s) => write!(f, "{s}"),
+            Token::Int(n) => write!(f, "{n}"),
+            Token::Plus => write!(f, "+"),
+            Token::Minus => write!(f, "-"),
+            Token::Star => write!(f, "*"),
+            Token::Ampersand => write!(f, "&"),
+            Token::Pipe_ => write!(f, "|"),
+            Token::Caret => write!(f, "^"),
+            Token::Bang => write!(f, "!"),
+            Token::Eq => write!(f, "=="),
+            Token::Neq => write!(f, "!="),
+            Token::Lt => write!(f, "<"),
+            Token::Gt => write!(f, ">"),
+            Token::Le => write!(f, "<="),
+            Token::Ge => write!(f, ">="),
+            Token::Shl => write!(f, "<<"),
+            Token::Shr => write!(f, ">>"),
+            Token::LogicalAnd => write!(f, "&&"),
+            Token::LogicalOr => write!(f, "||"),
+            Token::Times => write!(f, "×"),
+            Token::Dot => write!(f, "."),
+            Token::Colon => write!(f, ":"),
+            Token::Assign => write!(f, "="),
+            Token::Arrow => write!(f, "=>"),
+            Token::ColonEq => write!(f, ":="),
+            Token::Comma => write!(f, ","),
+            Token::Underscore => write!(f, "_"),
+            Token::LParen => write!(f, "("),
+            Token::RParen => write!(f, ")"),
+            Token::LBrack => write!(f, "["),
+            Token::RBrack => write!(f, "]"),
+            Token::LBrace => write!(f, "{{"),
+            Token::RBrace => write!(f, "}}"),
+        }
+    }
+}

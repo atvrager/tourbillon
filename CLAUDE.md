@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0 — parser, desugaring, and type checker scaffolded. `TOURBILLON.md` is the authoritative specification.
+**Status:** Phase 0 complete — lexer, parser, desugaring, type checker, and Cell linearity checker implemented. `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -85,13 +85,26 @@ This graph enables deadlock analysis (Petri net / KPN capacity checks), rule con
 
 ```
 src/
-  main.rs          -- CLI (clap): tbn check <file>
-  lib.rs           -- Pipeline: parse → desugar → type-check
-  ast.rs           -- AST types (Spanned nodes, all language constructs)
-  parse/mod.rs     -- Chumsky parser → SourceFile
-  desugar.rs       -- Cell → depth-1 Queue, pattern match → decision tree
-  types.rs         -- HM type inference + Cell linearity checking
-  diagnostics.rs   -- Error/warning types + ariadne rendering
+  main.rs            -- CLI (clap): tbn check <file>
+  lib.rs             -- Pipeline: parse → desugar → type-check
+  ast.rs             -- AST types (Spanned nodes, all language constructs)
+  parse/
+    mod.rs           -- Orchestrates lexer → parser, converts errors
+    token.rs         -- Token enum (keywords, operators, punctuation)
+    lexer.rs         -- Chumsky character-level lexer → token stream
+    parser.rs        -- Chumsky token-level parser → AST
+  desugar.rs         -- MethodCall → Take/TryTake/Peek/Put resolution
+  types/
+    mod.rs           -- Orchestration: collect type defs, check processes/pipes
+    ty.rs            -- Internal type representation (Bits, Bool, Tuple, Record, ...)
+    env.rs           -- Type environment: scoped name → type mapping
+    check.rs         -- Expression/statement type inference
+    linearity.rs     -- Cell take/put discipline per rule
+  diagnostics.rs     -- Error/warning types + ariadne rendering
+tests/
+  smoke.rs           -- Basic end-to-end tests
+  process.rs         -- Process + rule integration tests
+  linearity.rs       -- Cell linearity error tests
 ```
 
 ### Provenance System

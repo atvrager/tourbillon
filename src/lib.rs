@@ -18,7 +18,16 @@ pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
     }
 
     let cst = cst.expect("no CST produced despite zero parse errors");
-    let ast = desugar::desugar(cst);
+
+    let mut desugar_errors = vec![];
+    let ast = desugar::desugar(cst, &mut desugar_errors);
+
+    if !desugar_errors.is_empty() {
+        report_errors(src, filename, &desugar_errors);
+        return Err(Errors {
+            diagnostics: desugar_errors,
+        });
+    }
 
     let type_errors = types::check(&ast);
     if !type_errors.is_empty() {
