@@ -260,6 +260,9 @@ package rv32i_pkg;
     input [31:0] rs1_val, input [31:0] rs2_val,
     input [31:0] imm, input [31:0] pc
   );
+    // Only branch/jump opcodes can redirect
+    if (!is_branch(opcode))
+      return pc + 32'd4;
     if (is_taken(opcode, funct3, rs1_val, rs2_val))
       return compute_branch_target(opcode, pc, rs1_val, imm);
     else

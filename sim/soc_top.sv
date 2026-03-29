@@ -142,12 +142,12 @@ module soc_top (
             dmem_resp_valid_q <= 1'b0;
             dmem_resp_data_q  <= 32'd0;
         end else begin
-            if (dmem_rd_req_valid && !dmem_resp_valid_q) begin
-                // Latch response on request
+            if (dmem_rd_req_valid) begin
+                // New request: latch response (even if previous still valid)
                 dmem_resp_valid_q <= 1'b1;
                 dmem_resp_data_q  <= dmem_raw_resp_data;
             end else if (dmem_resp_valid_q && dmem_rd_resp_ready) begin
-                // Consumed by Marie
+                // Consumed by Marie, no new request
                 dmem_resp_valid_q <= 1'b0;
             end
         end

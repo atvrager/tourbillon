@@ -531,6 +531,9 @@ struct SvEmitter<'a> {
     memory_edges: HashMap<EdgeIndex, bool>,
     /// Node indices for memory stub process nodes.
     memory_stub_nodes: HashSet<NodeIndex>,
+    /// Queue edges that are ONLY accessed via try_take (not blocking take).
+    /// These need deq_ready driven from always_comb, not assign.
+    try_take_only_edges: HashSet<EdgeIndex>,
 }
 
 /// Per-rule context for expression inlining.
@@ -545,6 +548,9 @@ struct RuleCtx<'a> {
     var_types: HashMap<String, Ty>,
     /// Counter for generating unique temporary variable names.
     temp_counter: usize,
+    /// deq_ready signals to assert inside match Some arms.
+    /// Set during emit_match_condition for try_take patterns.
+    pending_deq_readys: Vec<String>,
 }
 
 impl<'a> SvEmitter<'a> {
@@ -568,6 +574,35 @@ impl<'a> SvEmitter<'a> {
             }
         }
 
+        // Compute try_take-only edges: edges accessed via try_take but NOT blocking take
+        let mut all_blocking: HashSet<EdgeIndex> = HashSet::new();
+        let mut all_try_take: HashSet<EdgeIndex> = HashSet::new();
+        for node_idx in net.network.graph.node_indices() {
+            if memory_stub_nodes.contains(&node_idx) {
+                continue;
+            }
+            let node = &net.network.graph[node_idx];
+            let port_edges: HashMap<String, EdgeIndex> = node
+                .ports
+                .iter()
+                .filter_map(|p| p.bound_to.map(|e| (p.name.clone(), e)))
+                .collect();
+            for rule in &node.rules {
+                for pn in collect_blocking_takes(rule) {
+                    if let Some(&ei) = port_edges.get(&pn) {
+                        all_blocking.insert(ei);
+                    }
+                }
+                for pn in collect_try_takes(rule) {
+                    if let Some(&ei) = port_edges.get(&pn) {
+                        all_try_take.insert(ei);
+                    }
+                }
+            }
+        }
+        let try_take_only_edges: HashSet<EdgeIndex> =
+            all_try_take.difference(&all_blocking).copied().collect();
+
         Self {
             net,
             out: String::new(),
@@ -575,6 +610,7 @@ impl<'a> SvEmitter<'a> {
             provenance,
             memory_edges,
             memory_stub_nodes,
+            try_take_only_edges,
         }
     }
 
@@ -1104,7 +1140,6 @@ impl<'a> SvEmitter<'a> {
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
             if is_queue_like(&edge.kind) {
-                // For memory edges where CPU is reader, enq side is dead (no stub to drive it)
                 if let Some(&cpu_is_writer) = self.memory_edges.get(&edge_idx)
                     && !cpu_is_writer
                 {
@@ -1113,6 +1148,18 @@ impl<'a> SvEmitter<'a> {
                 let sname = sanitize(&edge.name);
                 self.line(&format!("q_{sname}_enq_valid = 1'b0;"));
                 self.line(&format!("q_{sname}_enq_data = '0;"));
+            }
+        }
+
+        // Default deq_ready for try_take-only queues (driven from always_comb)
+        {
+            let tt_defaults: Vec<String> = self
+                .try_take_only_edges
+                .iter()
+                .map(|ei| sanitize(&self.net.network.graph[*ei].name))
+                .collect();
+            for sname in tt_defaults {
+                self.line(&format!("q_{sname}_deq_ready = 1'b0;"));
             }
         }
 
@@ -1150,6 +1197,7 @@ impl<'a> SvEmitter<'a> {
                         vars: HashMap::new(),
                         var_types: HashMap::new(),
                         temp_counter: 0,
+                        pending_deq_readys: vec![],
                     };
 
                     self.line(&format!("// Rule: {inst}.{rule_name}"));
@@ -1207,19 +1255,8 @@ impl<'a> SvEmitter<'a> {
                     }
                 }
 
-                // try_take: deq_ready = will_fire & deq_valid
-                let try_takes = collect_try_takes(rule);
-                for port_name in &try_takes {
-                    if let Some(&edge_idx) = port_edges.get(port_name) {
-                        let edge = &self.net.network.graph[edge_idx];
-                        if is_queue_like(&edge.kind) {
-                            let sname = sanitize(&edge.name);
-                            deq_ready_drivers.entry(edge_idx).or_default().push(format!(
-                                "(r_{inst}_{rule_name}_will_fire & q_{sname}_deq_valid)"
-                            ));
-                        }
-                    }
-                }
+                // try_take: deq_ready driven from always_comb (not assign).
+                // Skip here — handled by pending_deq_readys in match arm emission.
             }
         }
 
@@ -1233,6 +1270,10 @@ impl<'a> SvEmitter<'a> {
             if let Some(&cpu_is_writer) = self.memory_edges.get(&edge_idx)
                 && cpu_is_writer
             {
+                continue;
+            }
+            // Skip try_take-only edges — their deq_ready is driven from always_comb
+            if self.try_take_only_edges.contains(&edge_idx) {
                 continue;
             }
             let sname = sanitize(&edge.name);
@@ -1341,8 +1382,11 @@ impl<'a> SvEmitter<'a> {
                 }
             }
             Stmt::Expr(expr) => {
-                // Expression as statement — evaluate for side effects (none in HW)
-                let _ = self.emit_expr(&expr.node, ctx);
+                // Expression as statement — emit for side effects (DPI calls)
+                let sv = self.emit_expr(&expr.node, ctx);
+                if matches!(&expr.node, Expr::Call { .. }) {
+                    self.line(&format!("{sv};"));
+                }
             }
             Stmt::If {
                 cond,
@@ -1371,6 +1415,7 @@ impl<'a> SvEmitter<'a> {
                 let scrut_ty = self.infer_expr_type(&scrutinee.node, ctx);
 
                 for (i, arm) in arms.iter().enumerate() {
+                    ctx.pending_deq_readys.clear();
                     let cond =
                         self.emit_match_condition(&arm.pattern.node, &scrut_sv, &scrut_ty, ctx);
 
@@ -1380,6 +1425,10 @@ impl<'a> SvEmitter<'a> {
                         self.line(&format!("end else if ({cond}) begin"));
                     }
                     self.indent();
+                    // Emit deq_ready for try_take queues consumed in this arm
+                    for dr in &ctx.pending_deq_readys.clone() {
+                        self.line(&format!("{dr} = 1'b1;"));
+                    }
                     for s in &arm.body {
                         self.emit_stmt(&s.node, ctx);
                     }
@@ -1619,6 +1668,19 @@ impl<'a> SvEmitter<'a> {
                     };
                     match name.as_str() {
                         "Some" => {
+                            // Record deq_ready for try_take queues
+                            // scrut_sv is {q_foo_deq_valid, q_foo_deq_data}
+                            // Extract q_foo_deq_ready from the pattern
+                            if let Some(inner) = scrut_sv.strip_prefix('{')
+                                && let Some(inner) = inner.strip_suffix('}')
+                                && let Some(comma) = inner.find(", ")
+                            {
+                                let valid_signal = &inner[..comma]; // q_foo_deq_valid
+                                if let Some(base) = valid_signal.strip_suffix("_deq_valid") {
+                                    ctx.pending_deq_readys.push(format!("{base}_deq_ready"));
+                                }
+                            }
+
                             // Bind the inner value (lower bits of Option encoding).
                             // For tuple inner types, bind each element directly from
                             // the scrutinee to avoid chained bit-slices.
