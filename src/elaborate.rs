@@ -19,9 +19,21 @@ pub fn elaborate(
     let mut diagnostics = vec![];
     let (processes, pipes) = index_definitions(source);
 
+    // Find pipes that are instantiated as children of other pipes — skip elaborating them
+    // as top-level, since they'll be elaborated inline when the parent is elaborated.
+    let mut child_pipes: HashSet<String> = HashSet::new();
+    for pipe in pipes.values() {
+        for inst in &pipe.instances {
+            if pipes.contains_key(&inst.process_name.node) {
+                child_pipes.insert(inst.process_name.node.clone());
+            }
+        }
+    }
+
     let mut networks = vec![];
     for item in &source.items {
         if let Item::Pipe(pipe) = &item.node
+            && !child_pipes.contains(&pipe.name.node)
             && let Some(net) = elaborate_pipe(pipe, &processes, &pipes, type_env, &mut diagnostics)
         {
             networks.push(net);
@@ -129,14 +141,25 @@ fn elaborate_pipe(
     type_env: &TypeEnv,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ProcessNetwork> {
+    elaborate_pipe_inner(pipe, processes, pipes, type_env, diagnostics, false)
+}
+
+fn elaborate_pipe_inner(
+    pipe: &Pipe,
+    processes: &HashMap<String, &Process>,
+    pipes: &HashMap<String, &Pipe>,
+    type_env: &TypeEnv,
+    diagnostics: &mut Vec<Diagnostic>,
+    allow_dangling: bool,
+) -> Option<ProcessNetwork> {
     let mut graph = petgraph::graph::DiGraph::new();
     let mut instances: HashMap<String, NodeIndex> = HashMap::new();
     let mut had_error = false;
-    // Track pipe instance port mappings: inst_name → (port_name → queue_name_in_child)
-    // Used to wire parent bindings through to child pipe's dangling endpoints.
-    let mut pipe_instance_ports: HashMap<String, HashMap<String, String>> = HashMap::new();
     // Domain mappings from pipe instances (applied during domain collection phase)
     let mut pipe_instance_domains: HashMap<String, Option<String>> = HashMap::new();
+    // Cross-pipe edge substitutions: child_prefixed_edge_name → parent_queue_name
+    // These are applied after the parent's queue edges are created.
+    let mut cross_pipe_subs: Vec<(String, String)> = vec![];
 
     // Phase 1 + 2: Create nodes from instances
     for (idx, inst) in pipe.instances.iter().enumerate() {
@@ -154,8 +177,9 @@ fn elaborate_pipe(
                 continue;
             }
 
-            // Recursively elaborate the child pipe
-            let child_net = elaborate_pipe(child_pipe, processes, pipes, type_env, diagnostics);
+            // Recursively elaborate the child pipe (allow dangling endpoints)
+            let child_net =
+                elaborate_pipe_inner(child_pipe, processes, pipes, type_env, diagnostics, true);
             let Some(child_net) = child_net else {
                 had_error = true;
                 continue;
@@ -236,15 +260,13 @@ fn elaborate_pipe(
                 }
             }
 
-            // Pipe port mapping: the parent's bindings reference queue names
-            // in the child pipe. Map binding port names to the prefixed edge
-            // names in the merged parent graph.
-            let mut port_map: HashMap<String, String> = HashMap::new();
+            // Cross-pipe wiring: each binding maps a child queue name to a parent queue.
+            // Record substitutions: child's prefixed edge → parent queue name.
             for binding in &inst.bindings {
-                let child_queue_name = format!("{}_{}", inst_prefix, binding.port.node);
-                port_map.insert(binding.port.node.clone(), child_queue_name);
+                let child_edge_name = format!("{}_{}", inst_prefix, binding.port.node);
+                let parent_queue_name = binding.target.node.clone();
+                cross_pipe_subs.push((child_edge_name, parent_queue_name));
             }
-            pipe_instance_ports.insert(inst_prefix, port_map);
 
             continue;
         }
@@ -722,12 +744,122 @@ fn elaborate_pipe(
         if pending.edge_idx.is_some() {
             continue; // Already in graph (shouldn't happen for queue decls)
         }
+
+        let writer_node = pending
+            .writer
+            .as_ref()
+            .and_then(|(w, _)| instances.get(w))
+            .copied();
+        let reader_node = pending
+            .reader
+            .as_ref()
+            .and_then(|(r, _)| instances.get(r))
+            .copied();
+
+        match (writer_node, reader_node) {
+            (Some(src), Some(dst)) => {
+                let edge_idx = graph.add_edge(src, dst, pending.edge_data.clone());
+                queue_edge_map.insert(queue_name.clone(), edge_idx);
+            }
+            (Some(node), None) if allow_dangling => {
+                // Dangling: only writer. Create self-loop; parent will rewire.
+                let edge_idx = graph.add_edge(node, node, pending.edge_data.clone());
+                queue_edge_map.insert(queue_name.clone(), edge_idx);
+            }
+            (None, Some(node)) if allow_dangling => {
+                // Dangling: only reader. Create self-loop; parent will rewire.
+                let edge_idx = graph.add_edge(node, node, pending.edge_data.clone());
+                queue_edge_map.insert(queue_name.clone(), edge_idx);
+            }
+            _ => {} // Missing both — skip
+        }
+    }
+
+    // Phase 4a: Apply cross-pipe edge substitutions.
+    // For each binding on a pipe instance, replace the child's merged edge
+    // with the parent's queue edge, rebinding all process ports.
+    for (child_edge_name, parent_queue_name) in &cross_pipe_subs {
+        // Find the child edge in the graph by name
+        let child_edge_idx = graph
+            .edge_indices()
+            .find(|&ei| graph[ei].name == *child_edge_name);
+        let Some(child_edge_idx) = child_edge_idx else {
+            continue; // Edge not found (may have been a self-loop or similar)
+        };
+
+        // Get the parent queue's edge index
+        let parent_edge_idx = queue_edge_map.get(parent_queue_name).copied();
+
+        // If parent queue edge exists, rebind all ports from child edge to parent edge
+        if let Some(parent_edge_idx) = parent_edge_idx {
+            for node_idx in graph.node_indices() {
+                for port in &mut graph[node_idx].ports {
+                    if port.bound_to == Some(child_edge_idx) {
+                        port.bound_to = Some(parent_edge_idx);
+                    }
+                }
+            }
+        } else {
+            // Parent queue is deferred or pending — record the child edge's endpoints
+            // so the parent queue inherits them. Look up the child edge endpoints.
+            let (child_src, child_dst) = graph.edge_endpoints(child_edge_idx).unwrap();
+            let child_src_name = graph[child_src].instance_name.clone();
+            let child_dst_name = graph[child_dst].instance_name.clone();
+            let child_span = graph[child_edge_idx].span.clone();
+
+            if let Some(pending) = pending_edges.get_mut(parent_queue_name) {
+                // Check: if child edge src→dst, and it's a queue edge, then
+                // src is writer, dst is reader. Register them in parent pending.
+                if pending.writer.is_none() {
+                    pending.writer = Some((child_src_name.clone(), child_span.clone()));
+                }
+                if pending.reader.is_none() {
+                    pending.reader = Some((child_dst_name.clone(), child_span.clone()));
+                }
+            }
+
+            // Don't remove child edge yet — we need it for port bindings.
+            // It will be replaced when the parent deferred edge is created.
+            // Store a deferred substitution to apply after parent edges exist.
+        }
+    }
+
+    // Re-create any deferred queue edges that gained endpoints from cross-pipe subs
+    for queue_name in &deferred_names {
+        if queue_edge_map.contains_key(queue_name) {
+            continue; // Already created
+        }
+        let Some(pending) = pending_edges.get(queue_name) else {
+            continue;
+        };
+        if pending.edge_idx.is_some() {
+            continue;
+        }
         if let (Some((writer, _)), Some((reader, _))) = (&pending.writer, &pending.reader)
             && let (Some(&src_node), Some(&dst_node)) =
                 (instances.get(writer), instances.get(reader))
         {
             let edge_idx = graph.add_edge(src_node, dst_node, pending.edge_data.clone());
             queue_edge_map.insert(queue_name.clone(), edge_idx);
+
+            // Now rebind any child process ports that were on the old child edge
+            for (child_edge_name, parent_q) in &cross_pipe_subs {
+                if parent_q != queue_name {
+                    continue;
+                }
+                let old_child_edge = graph
+                    .edge_indices()
+                    .find(|&ei| graph[ei].name == *child_edge_name);
+                if let Some(old_ei) = old_child_edge {
+                    for node_idx in graph.node_indices() {
+                        for port in &mut graph[node_idx].ports {
+                            if port.bound_to == Some(old_ei) {
+                                port.bound_to = Some(edge_idx);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -787,26 +919,30 @@ fn elaborate_pipe(
         }
     }
 
-    // Check every queue has exactly one writer and one reader
+    // Check every queue has exactly one writer and one reader.
+    // When allow_dangling is true (child pipe), queues with missing endpoints
+    // become pipe ports rather than errors.
     for (queue_name, pending) in &pending_edges {
         // Skip self-loop edges (they are implicitly wired)
         if queue_name.contains('.') {
             continue;
         }
 
-        if pending.writer.is_none() {
-            diagnostics.push(Diagnostic::error(
-                pending.decl_span.clone(),
-                format!("queue `{queue_name}` has no writer"),
-            ));
-            had_error = true;
-        }
-        if pending.reader.is_none() {
-            diagnostics.push(Diagnostic::error(
-                pending.decl_span.clone(),
-                format!("queue `{queue_name}` has no reader"),
-            ));
-            had_error = true;
+        if !allow_dangling {
+            if pending.writer.is_none() {
+                diagnostics.push(Diagnostic::error(
+                    pending.decl_span.clone(),
+                    format!("queue `{queue_name}` has no writer"),
+                ));
+                had_error = true;
+            }
+            if pending.reader.is_none() {
+                diagnostics.push(Diagnostic::error(
+                    pending.decl_span.clone(),
+                    format!("queue `{queue_name}` has no reader"),
+                ));
+                had_error = true;
+            }
         }
     }
 
