@@ -1,10 +1,14 @@
 // marie_top.sv — Xilinx Virtex UltraScale+ toplevel for the Marie Antoinette SoC
 //
+// Two modes controlled by the STANDALONE parameter:
+//   STANDALONE = 0: Memory interfaces exposed as ports (external SRAM/controller)
+//   STANDALONE = 1: Internal BRAM initialised from hex via $readmemh
+//                   (imem = distributed RAM, dmem = block RAM)
+//
 // Board interface:
 //   - 100 MHz LVDS differential clock pair (sys_clk_p/n)
 //   - Active-low pushbutton reset (sys_rst_n)
-//   - UART TX/RX/RTS pins
-//   - Memory interfaces (imem, dmem) to external SRAM/BRAM
+//   - UART TX/RX/RTS/CTS pins
 //
 // Clock generation via MMCME4_ADV (VCO = 1200 MHz):
 //   cpu_clk  = 100 MHz  (VCO / 12)
@@ -15,12 +19,18 @@
 
 import rv32i_pkg::*;
 
-module marie_top (
+module marie_top #(
+    parameter STANDALONE  = 0,
+    parameter IMEM_FILE   = "hello.hex",
+    parameter DMEM_FILE   = "hello.hex",
+    parameter IMEM_DEPTH  = 4096,     // 16 KB  (STANDALONE only)
+    parameter DMEM_DEPTH  = 16384     // 64 KB  (STANDALONE only)
+)(
     // 100 MHz LVDS differential clock
     input  wire sys_clk_p,
     input  wire sys_clk_n,
 
-    // Active-low system reset (directly from pad, no external debounce assumed)
+    // Active-low system reset
     input  wire sys_rst_n,
 
     // UART physical pins
@@ -29,7 +39,7 @@ module marie_top (
     output wire uart_rts_n,
     input  wire uart_cts_n,
 
-    // CPU instruction memory interface (cpu_clk domain)
+    // Memory interfaces (active when STANDALONE = 0; unused when 1)
     output wire        imem_rd_req_valid,
     input  wire        imem_rd_req_ready,
     output wire [31:0] imem_rd_req_data,
@@ -40,7 +50,6 @@ module marie_top (
     input  wire        imem_wr_req_ready,
     output wire [63:0] imem_wr_req_data,
 
-    // Device data memory interface (dev_clk domain)
     output wire        dmem_rd_req_valid,
     input  wire        dmem_rd_req_ready,
     output wire [31:0] dmem_rd_req_data,
@@ -55,10 +64,6 @@ module marie_top (
     // =========================================================================
     // Clock generation
     // =========================================================================
-
-    // -------------------------------------------------------------------------
-    // Differential input buffer → single-ended 100 MHz reference
-    // -------------------------------------------------------------------------
     wire sys_clk_ibuf;
 
     IBUFDS #(
@@ -69,14 +74,6 @@ module marie_top (
         .O  (sys_clk_ibuf)
     );
 
-    // -------------------------------------------------------------------------
-    // MMCME4_ADV: 100 MHz → cpu (100), xbar (150), dev (50)
-    // -------------------------------------------------------------------------
-    // VCO = 100 MHz × 12.0 = 1200 MHz  (UltraScale+ range: 600–1440 MHz)
-    // CLKOUT0 = 1200 / 12  = 100 MHz   (cpu)
-    // CLKOUT1 = 1200 / 8   = 150 MHz   (xbar)
-    // CLKOUT2 = 1200 / 24  =  50 MHz   (dev)
-    // -------------------------------------------------------------------------
     wire mmcm_clkfb;
     wire mmcm_locked;
     wire cpu_clk_mmcm;
@@ -88,67 +85,35 @@ module marie_top (
         .CLKFBOUT_MULT_F    (12.000),   // VCO = 1200 MHz
         .CLKFBOUT_PHASE     (0.000),
         .DIVCLK_DIVIDE      (1),
-
         .CLKOUT0_DIVIDE_F   (12.000),   // 100 MHz — cpu
         .CLKOUT0_PHASE      (0.000),
         .CLKOUT0_DUTY_CYCLE (0.500),
-
         .CLKOUT1_DIVIDE     (8),        // 150 MHz — xbar
         .CLKOUT1_PHASE      (0.000),
         .CLKOUT1_DUTY_CYCLE (0.500),
-
         .CLKOUT2_DIVIDE     (24),       //  50 MHz — dev
         .CLKOUT2_PHASE      (0.000),
         .CLKOUT2_DUTY_CYCLE (0.500)
     ) u_mmcm (
         .CLKIN1     (sys_clk_ibuf),
         .CLKIN2     (1'b0),
-        .CLKINSEL   (1'b1),            // select CLKIN1
-        .RST        (~sys_rst_n),       // MMCM reset (active-high)
+        .CLKINSEL   (1'b1),
+        .RST        (~sys_rst_n),
         .PWRDWN     (1'b0),
-
         .CLKFBIN    (mmcm_clkfb),
-        .CLKFBOUT   (mmcm_clkfb),      // internal feedback (zero-delay)
-
+        .CLKFBOUT   (mmcm_clkfb),
         .CLKOUT0    (cpu_clk_mmcm),
         .CLKOUT1    (xbar_clk_mmcm),
         .CLKOUT2    (dev_clk_mmcm),
-
         .LOCKED     (mmcm_locked),
-
-        // Unused outputs / dynamic reconfig
-        .CLKOUT0B   (),
-        .CLKOUT1B   (),
-        .CLKOUT2B   (),
-        .CLKOUT3    (),
-        .CLKOUT3B   (),
-        .CLKOUT4    (),
-        .CLKOUT5    (),
-        .CLKOUT6    (),
-        .CLKFBOUTB  (),
-        .DO         (),
-        .DRDY       (),
-        .PSDONE     (),
-        .CDDCREQ    (),
-        .CDDCDONE   (),
-
-        // Unused inputs
-        .DADDR      (7'h0),
-        .DI         (16'h0),
-        .DWE        (1'b0),
-        .DEN        (1'b0),
-        .DCLK       (1'b0),
-        .PSCLK      (1'b0),
-        .PSEN       (1'b0),
-        .PSINCDEC   (1'b0)
+        .CLKOUT0B(), .CLKOUT1B(), .CLKOUT2B(),
+        .CLKOUT3(), .CLKOUT3B(), .CLKOUT4(), .CLKOUT5(), .CLKOUT6(),
+        .CLKFBOUTB(), .DO(), .DRDY(), .PSDONE(), .CDDCREQ(), .CDDCDONE(),
+        .DADDR(7'h0), .DI(16'h0), .DWE(1'b0), .DEN(1'b0), .DCLK(1'b0),
+        .PSCLK(1'b0), .PSEN(1'b0), .PSINCDEC(1'b0)
     );
 
-    // -------------------------------------------------------------------------
-    // Global clock buffers
-    // -------------------------------------------------------------------------
-    wire cpu_clk;
-    wire xbar_clk;
-    wire dev_clk;
+    wire cpu_clk, xbar_clk, dev_clk;
 
     BUFGCE u_bufg_cpu  (.I(cpu_clk_mmcm),  .CE(1'b1), .O(cpu_clk));
     BUFGCE u_bufg_xbar (.I(xbar_clk_mmcm), .CE(1'b1), .O(xbar_clk));
@@ -157,29 +122,99 @@ module marie_top (
     // =========================================================================
     // Reset synchronisation
     // =========================================================================
-    // Async assert (immediate on sys_rst_n or MMCM unlock), sync deassert
-    // (clean release on the rising edge of each domain clock).
-    // Two-FF synchroniser per domain — standard Xilinx reset methodology.
-
     wire async_rst_n = sys_rst_n & mmcm_locked;
-
-    wire cpu_rst_n;
-    wire xbar_rst_n;
-    wire dev_rst_n;
+    wire cpu_rst_n, xbar_rst_n, dev_rst_n;
 
     rst_sync u_rst_cpu  (.clk(cpu_clk),  .async_rst_n(async_rst_n), .sync_rst_n(cpu_rst_n));
     rst_sync u_rst_xbar (.clk(xbar_clk), .async_rst_n(async_rst_n), .sync_rst_n(xbar_rst_n));
     rst_sync u_rst_dev  (.clk(dev_clk),  .async_rst_n(async_rst_n), .sync_rst_n(dev_rst_n));
 
     // =========================================================================
+    // Memory interconnect
+    // =========================================================================
+    // Internal wires — driven by either external ports or internal BRAMs.
+    wire        imem_req_v,  imem_req_r;
+    wire [31:0] imem_req_d;
+    wire        imem_resp_v, imem_resp_r;
+    wire [31:0] imem_resp_d;
+    wire        imem_wr_v,   imem_wr_r;
+    wire [63:0] imem_wr_d;
+
+    wire        dmem_req_v,  dmem_req_r;
+    wire [31:0] dmem_req_d;
+    wire        dmem_resp_v, dmem_resp_r;
+    wire [31:0] dmem_resp_d;
+    wire        dmem_wr_v,   dmem_wr_r;
+    wire [63:0] dmem_wr_d;
+
+    generate
+        if (STANDALONE) begin : gen_bram
+            // ----- Internal BRAMs baked with hex -----
+            fpga_mem #(
+                .DEPTH(IMEM_DEPTH), .MEMFILE(IMEM_FILE), .USE_BRAM(0)
+            ) u_imem (
+                .clk(cpu_clk), .rst_n(cpu_rst_n),
+                .rd_req_valid(imem_req_v),   .rd_req_ready(imem_req_r),
+                .rd_req_data(imem_req_d),
+                .rd_resp_valid(imem_resp_v), .rd_resp_ready(imem_resp_r),
+                .rd_resp_data(imem_resp_d),
+                .wr_req_valid(imem_wr_v),    .wr_req_ready(imem_wr_r),
+                .wr_req_data(imem_wr_d)
+            );
+
+            fpga_mem #(
+                .DEPTH(DMEM_DEPTH), .MEMFILE(DMEM_FILE), .USE_BRAM(1)
+            ) u_dmem (
+                .clk(dev_clk), .rst_n(dev_rst_n),
+                .rd_req_valid(dmem_req_v),   .rd_req_ready(dmem_req_r),
+                .rd_req_data(dmem_req_d),
+                .rd_resp_valid(dmem_resp_v), .rd_resp_ready(dmem_resp_r),
+                .rd_resp_data(dmem_resp_d),
+                .wr_req_valid(dmem_wr_v),    .wr_req_ready(dmem_wr_r),
+                .wr_req_data(dmem_wr_d)
+            );
+
+            // External memory ports unused in standalone mode
+            assign imem_rd_req_valid = 1'b0;
+            assign imem_rd_req_data  = '0;
+            assign imem_rd_resp_ready = 1'b0;
+            assign imem_wr_req_valid = 1'b0;
+            assign imem_wr_req_data  = '0;
+            assign dmem_rd_req_valid = 1'b0;
+            assign dmem_rd_req_data  = '0;
+            assign dmem_rd_resp_ready = 1'b0;
+            assign dmem_wr_req_valid = 1'b0;
+            assign dmem_wr_req_data  = '0;
+        end else begin : gen_ext
+            // ----- External memory ports -----
+            assign imem_rd_req_valid = imem_req_v;
+            assign imem_req_r        = imem_rd_req_ready;
+            assign imem_rd_req_data  = imem_req_d;
+            assign imem_resp_v       = imem_rd_resp_valid;
+            assign imem_rd_resp_ready = imem_resp_r;
+            assign imem_resp_d       = imem_rd_resp_data;
+            assign imem_wr_req_valid = imem_wr_v;
+            assign imem_wr_r         = imem_wr_req_ready;
+            assign imem_wr_req_data  = imem_wr_d;
+
+            assign dmem_rd_req_valid = dmem_req_v;
+            assign dmem_req_r        = dmem_rd_req_ready;
+            assign dmem_rd_req_data  = dmem_req_d;
+            assign dmem_resp_v       = dmem_rd_resp_valid;
+            assign dmem_rd_resp_ready = dmem_resp_r;
+            assign dmem_resp_d       = dmem_rd_resp_data;
+            assign dmem_wr_req_valid = dmem_wr_v;
+            assign dmem_wr_r         = dmem_wr_req_ready;
+            assign dmem_wr_req_data  = dmem_wr_d;
+        end
+    endgenerate
+
+    // =========================================================================
     // UART pin wiring
     // =========================================================================
-    wire uart_tx_enq_valid;
-    wire uart_tx_enq_data;
-    wire uart_rts_enq_valid;
-    wire uart_rts_enq_data;
+    wire uart_tx_enq_valid, uart_tx_enq_data;
+    wire uart_rts_enq_valid, uart_rts_enq_data;
 
-    // TX: output the bit when valid, else idle high
     assign uart_tx    = uart_tx_enq_valid ? uart_tx_enq_data : 1'b1;
     assign uart_rts_n = uart_rts_enq_valid ? ~uart_rts_enq_data : 1'b1;
 
@@ -187,51 +222,42 @@ module marie_top (
     // Marie SoC instance
     // =========================================================================
     Marie marie_inst (
-        .cpu_clk    (cpu_clk),
-        .cpu_rst_n  (cpu_rst_n),
-        .xbar_clk   (xbar_clk),
-        .xbar_rst_n (xbar_rst_n),
-        .dev_clk    (dev_clk),
-        .dev_rst_n  (dev_rst_n),
+        .cpu_clk(cpu_clk), .cpu_rst_n(cpu_rst_n),
+        .xbar_clk(xbar_clk), .xbar_rst_n(xbar_rst_n),
+        .dev_clk(dev_clk), .dev_rst_n(dev_rst_n),
 
-        // CPU instruction memory (cpu_clk domain)
-        .q_CPUCore_imem_read_req_enq_valid  (imem_rd_req_valid),
-        .q_CPUCore_imem_read_req_enq_ready  (imem_rd_req_ready),
-        .q_CPUCore_imem_read_req_enq_data   (imem_rd_req_data),
-        .q_CPUCore_imem_read_resp_deq_valid (imem_rd_resp_valid),
-        .q_CPUCore_imem_read_resp_deq_ready (imem_rd_resp_ready),
-        .q_CPUCore_imem_read_resp_deq_data  (imem_rd_resp_data),
-        .q_CPUCore_imem_write_req_enq_valid (imem_wr_req_valid),
-        .q_CPUCore_imem_write_req_enq_ready (imem_wr_req_ready),
-        .q_CPUCore_imem_write_req_enq_data  (imem_wr_req_data),
+        // Instruction memory
+        .q_CPUCore_imem_read_req_enq_valid  (imem_req_v),
+        .q_CPUCore_imem_read_req_enq_ready  (imem_req_r),
+        .q_CPUCore_imem_read_req_enq_data   (imem_req_d),
+        .q_CPUCore_imem_read_resp_deq_valid (imem_resp_v),
+        .q_CPUCore_imem_read_resp_deq_ready (imem_resp_r),
+        .q_CPUCore_imem_read_resp_deq_data  (imem_resp_d),
+        .q_CPUCore_imem_write_req_enq_valid (imem_wr_v),
+        .q_CPUCore_imem_write_req_enq_ready (imem_wr_r),
+        .q_CPUCore_imem_write_req_enq_data  (imem_wr_d),
 
-        // Device data memory (dev_clk domain)
-        .q_dev_mem_read_req_enq_valid  (dmem_rd_req_valid),
-        .q_dev_mem_read_req_enq_ready  (dmem_rd_req_ready),
-        .q_dev_mem_read_req_enq_data   (dmem_rd_req_data),
-        .q_dev_mem_read_resp_deq_valid (dmem_rd_resp_valid),
-        .q_dev_mem_read_resp_deq_ready (dmem_rd_resp_ready),
-        .q_dev_mem_read_resp_deq_data  (dmem_rd_resp_data),
-        .q_dev_mem_write_req_enq_valid (dmem_wr_req_valid),
-        .q_dev_mem_write_req_enq_ready (dmem_wr_req_ready),
-        .q_dev_mem_write_req_enq_data  (dmem_wr_req_data),
+        // Data memory
+        .q_dev_mem_read_req_enq_valid  (dmem_req_v),
+        .q_dev_mem_read_req_enq_ready  (dmem_req_r),
+        .q_dev_mem_read_req_enq_data   (dmem_req_d),
+        .q_dev_mem_read_resp_deq_valid (dmem_resp_v),
+        .q_dev_mem_read_resp_deq_ready (dmem_resp_r),
+        .q_dev_mem_read_resp_deq_data  (dmem_resp_d),
+        .q_dev_mem_write_req_enq_valid (dmem_wr_v),
+        .q_dev_mem_write_req_enq_ready (dmem_wr_r),
+        .q_dev_mem_write_req_enq_data  (dmem_wr_d),
 
-        // UART TX pin (Marie produces bits → physical TX)
+        // UART
         .q_UartPhy_tx_pin_enq_valid (uart_tx_enq_valid),
         .q_UartPhy_tx_pin_enq_ready (1'b1),
         .q_UartPhy_tx_pin_enq_data  (uart_tx_enq_data),
-
-        // UART RX pin (physical RX → Marie consumes bits)
         .q_UartPhy_rx_pin_deq_valid (1'b1),
         .q_UartPhy_rx_pin_deq_ready (),
         .q_UartPhy_rx_pin_deq_data  (uart_rx),
-
-        // UART RTS pin (Marie produces → physical RTS)
         .q_UartPhy_rts_pin_enq_valid (uart_rts_enq_valid),
         .q_UartPhy_rts_pin_enq_ready (1'b1),
         .q_UartPhy_rts_pin_enq_data  (uart_rts_enq_data),
-
-        // UART CTS pin (physical CTS → Marie consumes, active-low inverted)
         .q_UartPhy_cts_pin_deq_valid (1'b1),
         .q_UartPhy_cts_pin_deq_ready (),
         .q_UartPhy_cts_pin_deq_data  (~uart_cts_n)
@@ -242,9 +268,6 @@ endmodule
 // =============================================================================
 // Reset synchroniser — async assert, sync deassert
 // =============================================================================
-// Standard two-FF synchroniser with ASYNC_REG attribute for Xilinx place & route.
-// Reset asserts immediately when async_rst_n drops; deasserts cleanly on the
-// second rising clock edge after async_rst_n goes high.
 
 module rst_sync (
     input  wire clk,

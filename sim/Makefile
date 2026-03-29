@@ -172,25 +172,26 @@ rtl-export: soc-sv tests/hello.elf tests/hello.hex
 	@rm -rf $(RTL_EXPORT_DIR) $(RTL_ZIP)
 	@mkdir -p $(RTL_EXPORT_DIR)
 	@# Copy sources in topo order (packages → leaves → middle → top)
-	@cp rv32i_pkg.sv                    $(RTL_EXPORT_DIR)/1_rv32i_pkg.sv
-	@cp $(SOC_SV_DIR)/tbn_fifo.sv       $(RTL_EXPORT_DIR)/2_tbn_fifo.sv
+	@cp rv32i_pkg.sv                     $(RTL_EXPORT_DIR)/1_rv32i_pkg.sv
+	@cp $(SOC_SV_DIR)/tbn_fifo.sv        $(RTL_EXPORT_DIR)/2_tbn_fifo.sv
 	@cp $(SOC_SV_DIR)/tbn_async_fifo.sv  $(RTL_EXPORT_DIR)/3_tbn_async_fifo.sv
-	@cp $(SOC_SV_DIR)/Marie.sv          $(RTL_EXPORT_DIR)/4_Marie.sv
-	@cp $(RTL_DIR)/fpga_mem.sv          $(RTL_EXPORT_DIR)/5_fpga_mem.sv
-	@cp $(RTL_DIR)/marie_top.sv         $(RTL_EXPORT_DIR)/6_marie_top.sv
-	@cp $(RTL_DIR)/marie_fpga.sv        $(RTL_EXPORT_DIR)/7_marie_fpga.sv
-	@cp tests/hello.hex                 $(RTL_EXPORT_DIR)/hello.hex
+	@cp $(SOC_SV_DIR)/Marie.sv           $(RTL_EXPORT_DIR)/4_Marie.sv
+	@cp $(RTL_DIR)/fpga_mem.sv           $(RTL_EXPORT_DIR)/5_fpga_mem.sv
+	@cp $(RTL_DIR)/marie_top.sv          $(RTL_EXPORT_DIR)/6_marie_top.sv
+	@cp tests/hello.hex                  $(RTL_EXPORT_DIR)/hello.hex
 	@# Generate filelist.f
 	@printf '// Marie Antoinette SoC — Vivado source file list (topo-sorted)\n' \
 		> $(RTL_EXPORT_DIR)/filelist.f
-	@printf '// Toplevel: marie_fpga (standalone with internal BRAM, hello.hex baked in)\n' \
+	@printf '// Toplevel: marie_top\n' \
 		>> $(RTL_EXPORT_DIR)/filelist.f
-	@printf '// Alt top:  marie_top  (external memory ports, no BRAM)\n' \
+	@printf '//   STANDALONE=1: internal BRAM from hello.hex (default for Hello World)\n' \
+		>> $(RTL_EXPORT_DIR)/filelist.f
+	@printf '//   STANDALONE=0: external memory ports\n' \
 		>> $(RTL_EXPORT_DIR)/filelist.f
 	@printf '// Xilinx primitives (IBUFDS, MMCME4_ADV, BUFGCE) resolved from unisim.\n' \
 		>> $(RTL_EXPORT_DIR)/filelist.f
 	@for f in 1_rv32i_pkg.sv 2_tbn_fifo.sv 3_tbn_async_fifo.sv \
-	          4_Marie.sv 5_fpga_mem.sv 6_marie_top.sv 7_marie_fpga.sv; do \
+	          4_Marie.sv 5_fpga_mem.sv 6_marie_top.sv; do \
 		echo "$$f" >> $(RTL_EXPORT_DIR)/filelist.f; \
 	done
 	@cd $(RTL_EXPORT_DIR) && zip -q ../$(RTL_ZIP) filelist.f hello.hex *.sv
