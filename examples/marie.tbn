@@ -1,0 +1,406 @@
+-- ============================================================
+-- The Marie Antoinette SoC
+-- ============================================================
+-- Named after the legendary Breguet No. 1160 "Marie Antoinette"
+-- pocket watch (1783–1827), the most ambitious tourbillon timepiece
+-- ever built. Like its namesake, this SoC pushes every mechanism
+-- to its limit.
+--
+-- Architecture:
+--   CPU (cpu domain) → CpuDmemAdapter → AsyncQueue → Xbar (xbar domain)
+--   Xbar → AsyncQueue → MemDevice (dev domain) → Memory
+--   Xbar → AsyncQueue → UartDevice (dev domain) → DPI uart_tx
+--
+-- imem: Direct Memory in cpu domain (fast path, no CDC)
+-- dmem: Through bus fabric with 6 async FIFOs across 3 clock domains
+
+-- ============================================================
+-- Constants
+-- ============================================================
+
+const MEM_REGION  = 0x8
+const UART_REGION = 0x1
+
+-- ============================================================
+-- Type definitions
+-- ============================================================
+
+type Word   = Bits 32
+type Addr   = Bits 32
+type RegIdx = Bits 5
+
+enum MemOp = Load | Store | None
+
+record Decoded {
+    op      : Bits 4
+    rd      : RegIdx
+    rs1_val : Word
+    rs2_val : Word
+    imm     : Word
+    pc      : Addr
+    mem     : MemOp
+    wb      : Bool
+    is_br   : Bool
+    funct3  : Bits 3
+    opcode  : Bits 7
+}
+
+record BusReq {
+    we   : Bool
+    addr : Addr
+    data : Word
+}
+
+type BusResp = Word
+
+-- ============================================================
+-- External functions
+-- ============================================================
+
+external fn uart_tx(ch : Bits 8)
+
+-- ============================================================
+-- CPU pipeline stages (from rv32i.tbn)
+-- ============================================================
+
+process Fetch {
+    consumes: redirect       : Queue(Addr)
+    consumes: done           : Queue(Bool)
+    produces: fetch_out      : Queue(Addr × Word)
+    consumes: imem_read_resp : Queue(Word)
+    produces: imem_read_req  : Queue(Addr)
+    produces: imem_write_req : Queue(Addr × Word)
+    state:    pc             : Cell(Addr, init = 0x8000_0000)
+
+    rule tick {
+        let credit = done.take()
+        let current_pc = pc.take()
+        match redirect.try_take() {
+            Some(target) => {
+                imem_read_req.put(target)
+                let instr = imem_read_resp.take()
+                fetch_out.put((target, instr))
+                pc.put(target + 4)
+            }
+            None => {
+                imem_read_req.put(current_pc)
+                let instr = imem_read_resp.take()
+                fetch_out.put((current_pc, instr))
+                pc.put(current_pc + 4)
+            }
+        }
+    }
+}
+
+process Decode {
+    consumes: fetch_in   : Queue(Addr × Word)
+    produces: decode_out : Queue(Decoded)
+    peeks:    regfile    : Cell(Array(32, Word))
+
+    rule crack {
+        let (pc, raw) = fetch_in.take()
+        match regfile.peek() {
+            Some(regs) => {
+                let rd      = decode_rd(raw)
+                let rs1     = decode_rs1(raw)
+                let rs2     = decode_rs2(raw)
+                let funct3  = decode_funct3(raw)
+                let funct7  = decode_funct7(raw)
+                let opcode  = decode_opcode(raw)
+                let alu_op  = decode_alu_op(opcode, funct3, funct7)
+                let imm     = decode_imm(raw, opcode)
+                let mem_op  = decode_mem_op(opcode)
+                let needs_wb = decode_needs_wb(opcode, rd)
+                let is_br   = is_branch(opcode)
+                decode_out.put(Decoded {
+                    op      = alu_op,
+                    rd      = rd,
+                    rs1_val = regs[rs1],
+                    rs2_val = regs[rs2],
+                    imm     = imm,
+                    pc      = pc,
+                    mem     = mem_op,
+                    wb      = needs_wb,
+                    is_br   = is_br,
+                    funct3  = funct3,
+                    opcode  = opcode
+                })
+            }
+            None => {
+                -- Regfile not ready; stall
+            }
+        }
+    }
+}
+
+process Execute {
+    consumes: exec_in        : Queue(Decoded)
+    produces: redirect       : Queue(Addr)
+    produces: writeback      : Queue(Bool × RegIdx × Word)
+    produces: dmem_read_req  : Queue(Addr)
+    consumes: dmem_read_resp : Queue(Word)
+    produces: dmem_write_req : Queue(Addr × Word)
+
+    rule go {
+        let d = exec_in.take()
+        let result = compute_result(d.op, d.opcode, d.rs1_val, d.rs2_val, d.imm, d.pc)
+
+        match d.mem {
+            Load => {
+                dmem_read_req.put(result)
+                let raw_word = dmem_read_resp.take()
+                let val = load_extend(d.funct3, raw_word, result & 3)
+                writeback.put((true, d.rd, val))
+            }
+            Store => {
+                dmem_read_req.put(result)
+                let old_word = dmem_read_resp.take()
+                let merged = store_merge(d.funct3, old_word, d.rs2_val, result & 3)
+                dmem_write_req.put((result, merged))
+                writeback.put((false, d.rd, result))
+            }
+            None => {
+                writeback.put((d.wb, d.rd, result))
+            }
+        }
+
+        if d.is_br && is_taken(d.opcode, d.funct3, d.rs1_val, d.rs2_val) {
+            redirect.put(compute_branch_target(d.opcode, d.pc, d.rs1_val, d.imm))
+        }
+    }
+}
+
+process Writeback {
+    consumes: wb_in   : Queue(Bool × RegIdx × Word)
+    state:    regfile : Cell(Array(32, Word), init = 0)
+    produces: done    : Queue(Bool)
+
+    rule commit {
+        let (wb, rd, val) = wb_in.take()
+        let regs = regfile.take()
+        if wb {
+            regfile.put(regs[rd := val])
+        } else {
+            regfile.put(regs)
+        }
+        done.put(true)
+    }
+}
+
+-- ============================================================
+-- CPU pipe (imem local, dmem exposed as ports)
+-- ============================================================
+
+pipe CPUCore {
+    -- Inter-stage queues
+    let fetch_q  = Queue(Addr × Word, depth = 1)
+    let decode_q = Queue(Decoded, depth = 1)
+    let redir_q  = Queue(Addr, depth = 1)
+    let wb_q     = Queue(Bool × RegIdx × Word, depth = 1)
+
+    -- Single-issue credit token
+    let done_q   = Queue(Bool, depth = 1, init = 1)
+
+    -- Instruction memory (local, fast path)
+    let imem = Memory(Addr → Word, depth = 4096, latency = 1)
+
+    -- Data memory interface (exposed as pipe ports — no local Memory)
+    let dmem_rd_req  = Queue(Addr, depth = 1)
+    let dmem_rd_resp = Queue(Word, depth = 1)
+    let dmem_wr_req  = Queue(Addr × Word, depth = 1)
+
+    Fetch {
+        fetch_out      = fetch_q,
+        redirect       = redir_q,
+        done           = done_q,
+        imem_read_req  = imem_read_req,
+        imem_read_resp = imem_read_resp,
+        imem_write_req = imem_write_req
+    }
+    Decode {
+        fetch_in   = fetch_q,
+        decode_out = decode_q,
+        regfile    = Writeback.regfile
+    }
+    Execute {
+        exec_in        = decode_q,
+        redirect       = redir_q,
+        writeback      = wb_q,
+        dmem_read_req  = dmem_rd_req,
+        dmem_read_resp = dmem_rd_resp,
+        dmem_write_req = dmem_wr_req
+    }
+    Writeback {
+        wb_in   = wb_q,
+        done    = done_q
+    }
+}
+
+-- ============================================================
+-- Bus adapter: CPU dmem �� BusReq/BusResp
+-- ============================================================
+
+process CpuDmemAdapter {
+    consumes: rd_req   : Queue(Addr)
+    produces: rd_resp  : Queue(Word)
+    consumes: wr_req   : Queue(Addr × Word)
+    produces: bus_req  : Queue(BusReq)
+    consumes: bus_resp : Queue(BusResp)
+
+    rule handle_read {
+        let addr = rd_req.take()
+        bus_req.put(BusReq { we = false, addr = addr, data = 0 })
+        let resp = bus_resp.take()
+        rd_resp.put(resp)
+    }
+    rule handle_write {
+        let (addr, data) = wr_req.take()
+        bus_req.put(BusReq { we = true, addr = addr, data = data })
+        let _ = bus_resp.take()
+    }
+}
+
+-- ============================================================
+-- Crossbar: 1 host → 2 devices
+-- ============================================================
+
+process Xbar {
+    consumes: host_req  : Queue(BusReq)
+    produces: host_resp : Queue(BusResp)
+    produces: dev0_req  : Queue(BusReq)
+    consumes: dev0_resp : Queue(BusResp)
+    produces: dev1_req  : Queue(BusReq)
+    consumes: dev1_resp : Queue(BusResp)
+
+    rule route {
+        let req = host_req.take()
+        let region = req.addr[31:28]
+        if region == MEM_REGION {
+            dev0_req.put(req)
+            let resp = dev0_resp.take()
+            host_resp.put(resp)
+        } else {
+            if region == UART_REGION {
+                dev1_req.put(req)
+                let resp = dev1_resp.take()
+                host_resp.put(resp)
+            } else {
+                host_resp.put(0)
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- Memory device: BusReq/BusResp → Memory
+-- ============================================================
+
+process MemDevice {
+    consumes: req          : Queue(BusReq)
+    produces: resp         : Queue(BusResp)
+    consumes: mem_rd_resp  : Queue(Word)
+    produces: mem_rd_req   : Queue(Addr)
+    produces: mem_wr_req   : Queue(Addr × Word)
+
+    rule handle {
+        let r = req.take()
+        if r.we {
+            mem_wr_req.put((r.addr, r.data))
+            resp.put(0)
+        } else {
+            mem_rd_req.put(r.addr)
+            let data = mem_rd_resp.take()
+            resp.put(data)
+        }
+    }
+}
+
+-- ============================================================
+-- UART device: BusReq/BusResp → DPI uart_tx
+-- ============================================================
+
+process UartDevice {
+    consumes: req  : Queue(BusReq)
+    produces: resp : Queue(BusResp)
+
+    rule handle {
+        let r = req.take()
+        if r.we {
+            uart_tx(r.data[7:0])
+            resp.put(0)
+        } else {
+            resp.put(1)
+        }
+    }
+}
+
+-- ============================================================
+-- Marie Antoinette SoC top-level
+-- ============================================================
+
+pipe Marie {
+    domain cpu  : Clock
+    domain xbar : Clock
+    domain dev  : Clock
+
+    -- CPU dmem adapter queues (cpu domain)
+    let adapter_rd_req  = Queue(Addr, depth = 1)
+    let adapter_rd_resp = Queue(Word, depth = 1)
+    let adapter_wr_req  = Queue(Addr × Word, depth = 1)
+
+    -- Bus fabric queues (cpu → xbar boundary)
+    let cpu_bus_req  = AsyncQueue(BusReq,  depth = 4)
+    let cpu_bus_resp = AsyncQueue(BusResp, depth = 4)
+
+    -- Bus fabric queues (xbar → dev boundary, memory)
+    let mem_bus_req  = AsyncQueue(BusReq,  depth = 4)
+    let mem_bus_resp = AsyncQueue(BusResp, depth = 4)
+
+    -- Bus fabric queues (xbar → dev boundary, UART)
+    let uart_bus_req  = AsyncQueue(BusReq,  depth = 4)
+    let uart_bus_resp = AsyncQueue(BusResp, depth = 4)
+
+    -- Device memory (dev domain)
+    let dev_mem = Memory(Addr → Word, depth = 16384, latency = 1)
+
+    -- CPU core (with dmem exposed as ports, imem internal)
+    CPUCore [cpu] {
+        dmem_rd_req  = adapter_rd_req,
+        dmem_rd_resp = adapter_rd_resp,
+        dmem_wr_req  = adapter_wr_req
+    }
+
+    -- CPU dmem adapter (cpu domain)
+    CpuDmemAdapter [cpu] {
+        rd_req   = adapter_rd_req,
+        rd_resp  = adapter_rd_resp,
+        wr_req   = adapter_wr_req,
+        bus_req  = cpu_bus_req,
+        bus_resp = cpu_bus_resp
+    }
+
+    -- Crossbar (xbar domain)
+    Xbar [xbar] {
+        host_req  = cpu_bus_req,
+        host_resp = cpu_bus_resp,
+        dev0_req  = mem_bus_req,
+        dev0_resp = mem_bus_resp,
+        dev1_req  = uart_bus_req,
+        dev1_resp = uart_bus_resp
+    }
+
+    -- Memory device (dev domain)
+    MemDevice [dev] {
+        req         = mem_bus_req,
+        resp        = mem_bus_resp,
+        mem_rd_req  = dev_mem_read_req,
+        mem_rd_resp = dev_mem_read_resp,
+        mem_wr_req  = dev_mem_write_req
+    }
+
+    -- UART device (dev domain)
+    UartDevice [dev] {
+        req  = uart_bus_req,
+        resp = uart_bus_resp
+    }
+}

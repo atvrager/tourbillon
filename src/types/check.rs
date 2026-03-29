@@ -4,6 +4,12 @@ use crate::diagnostics::Diagnostic;
 use super::env::TypeEnv;
 use super::ty::Ty;
 
+/// Check if both types are Bits (possibly different widths).
+/// SV auto-extends to the wider width, so Bits N vs Bits M is always valid.
+fn both_bits(a: &Ty, b: &Ty) -> bool {
+    matches!((a, b), (Ty::Bits(_), Ty::Bits(_)))
+}
+
 /// Check if a type contains Ty::Error anywhere (preventing cascading errors).
 fn contains_error(ty: &Ty) -> bool {
     match ty {
@@ -123,7 +129,12 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
                 | BinOp::Shl
                 | BinOp::Shr => {
                     // Arithmetic/bitwise: both operands same type, result same type
-                    if !contains_error(&lty) && !contains_error(&rty) && lty != rty {
+                    // Allow Bits N vs Bits M (SV auto-extends to max width)
+                    if !contains_error(&lty)
+                        && !contains_error(&rty)
+                        && lty != rty
+                        && !both_bits(&lty, &rty)
+                    {
                         diagnostics.push(Diagnostic::error(
                             expr.span.clone(),
                             format!("type mismatch: `{lty}` vs `{rty}`"),
@@ -133,7 +144,12 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
                 }
                 BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                     // Comparison: both operands same type, result Bool
-                    if !contains_error(&lty) && !contains_error(&rty) && lty != rty {
+                    // Allow Bits N vs Bits M (SV auto-extends to max width)
+                    if !contains_error(&lty)
+                        && !contains_error(&rty)
+                        && lty != rty
+                        && !both_bits(&lty, &rty)
+                    {
                         diagnostics.push(Diagnostic::error(
                             expr.span.clone(),
                             format!("type mismatch in comparison: `{lty}` vs `{rty}`"),
