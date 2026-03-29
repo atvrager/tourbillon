@@ -226,6 +226,18 @@ fn sv_type_decl(ty: &Ty) -> String {
     }
 }
 
+/// Map a Tourbillon type to a DPI-C type string.
+fn dpi_type_str(ty: &Ty) -> String {
+    match ty {
+        Ty::Bool => "bit".to_string(),
+        Ty::Bits(n) if *n <= 8 => "byte unsigned".to_string(),
+        Ty::Bits(n) if *n <= 16 => "shortint unsigned".to_string(),
+        Ty::Bits(n) if *n <= 32 => "int unsigned".to_string(),
+        Ty::Bits(_) => "longint unsigned".to_string(),
+        _ => "int unsigned".to_string(),
+    }
+}
+
 fn binop_sv(op: &BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
@@ -340,6 +352,7 @@ fn collect_try_takes_in_expr(expr: &Expr, try_takes: &mut BTreeSet<String>) {
                 collect_try_takes_in_expr(&arg.node, try_takes);
             }
         }
+        Expr::BitSlice { expr, .. } => collect_try_takes_in_expr(&expr.node, try_takes),
         _ => {}
     }
 }
@@ -412,6 +425,7 @@ fn collect_takes_in_expr(expr: &Expr, takes: &mut BTreeSet<String>) {
                 collect_takes_in_expr(&arg.node, takes);
             }
         }
+        Expr::BitSlice { expr, .. } => collect_takes_in_expr(&expr.node, takes),
         _ => {}
     }
 }
@@ -608,6 +622,8 @@ impl<'a> SvEmitter<'a> {
         }
         self.blank();
 
+        self.emit_constants();
+        self.emit_dpi_imports();
         self.emit_type_declarations();
         self.emit_queue_instances();
         self.emit_cell_declarations();
@@ -619,6 +635,50 @@ impl<'a> SvEmitter<'a> {
 
         self.line("endmodule");
         self.out.clone()
+    }
+
+    // -----------------------------------------------------------------------
+    // Constants and DPI imports
+    // -----------------------------------------------------------------------
+
+    fn emit_constants(&mut self) {
+        let constants = &self.net.network.constants;
+        if constants.is_empty() {
+            return;
+        }
+        let mut sorted: Vec<(&String, &u64)> = constants.iter().collect();
+        sorted.sort_by_key(|(name, _)| (*name).clone());
+        for (name, value) in sorted {
+            self.line(&format!("localparam {name} = {value};"));
+        }
+        self.blank();
+    }
+
+    fn emit_dpi_imports(&mut self) {
+        let external_fns = &self.net.network.external_fns;
+        if external_fns.is_empty() {
+            return;
+        }
+        #[allow(clippy::type_complexity)]
+        let mut sorted: Vec<(&String, &(Vec<Ty>, Option<Ty>))> = external_fns.iter().collect();
+        sorted.sort_by_key(|(name, _)| (*name).clone());
+        for (name, (param_tys, ret_ty)) in sorted {
+            let ret_sv = if let Some(ty) = ret_ty {
+                dpi_type_str(ty)
+            } else {
+                "void".to_string()
+            };
+            let params: Vec<String> = param_tys
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| format!("input {} p{i}", dpi_type_str(ty)))
+                .collect();
+            self.line(&format!(
+                "import \"DPI-C\" function {ret_sv} {name}({});",
+                params.join(", ")
+            ));
+        }
+        self.blank();
     }
 
     // -----------------------------------------------------------------------
@@ -1296,7 +1356,15 @@ impl<'a> SvEmitter<'a> {
             Expr::Lit(Literal::Int(n)) => format!("{n}"),
             Expr::Lit(Literal::Bool(true)) => "1'b1".to_string(),
             Expr::Lit(Literal::Bool(false)) => "1'b0".to_string(),
-            Expr::Var(name) => ctx.vars.get(name).cloned().unwrap_or_else(|| name.clone()),
+            Expr::Var(name) => {
+                if let Some(sv) = ctx.vars.get(name) {
+                    sv.clone()
+                } else if let Some(&val) = self.net.network.constants.get(name) {
+                    format!("{val}")
+                } else {
+                    name.clone()
+                }
+            }
             Expr::Take { queue } => {
                 if let Some(&edge_idx) = ctx.port_edges.get(queue) {
                     let edge = &self.net.network.graph[edge_idx];
@@ -1397,6 +1465,10 @@ impl<'a> SvEmitter<'a> {
                 // For now, we track that an update is needed and the caller
                 // handles it. As a simple approach, emit a helper signal.
                 format!("/* update({base}, {idx}, {val}) */")
+            }
+            Expr::BitSlice { expr, hi, lo } => {
+                let e = self.emit_expr(&expr.node, ctx);
+                format!("({e}[{hi}:{lo}])")
             }
             Expr::MethodCall { .. } => "/* unsupported expr */ '0".to_string(),
         }
@@ -1626,6 +1698,7 @@ impl<'a> SvEmitter<'a> {
                     Ty::Error
                 }
             }
+            Expr::BitSlice { hi, lo, .. } => Ty::Bits(hi - lo + 1),
             Expr::BinOp { lhs, .. } => self.infer_expr_type(&lhs.node, ctx),
             Expr::UnaryOp { expr: e, .. } => self.infer_expr_type(&e.node, ctx),
             _ => Ty::Error,

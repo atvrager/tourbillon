@@ -772,6 +772,8 @@ fn elaborate_pipe(
         type_defs,
         domains,
         domain_map,
+        constants: type_env.constants.clone(),
+        external_fns: type_env.external_fns.clone(),
     })
 }
 

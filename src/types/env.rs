@@ -12,6 +12,10 @@ pub struct TypeEnv {
     pub type_defs: HashMap<String, Ty>,
     /// Variable scope stack (innermost last)
     scopes: Vec<HashMap<String, Ty>>,
+    /// Compile-time constants: name → value
+    pub constants: HashMap<String, u64>,
+    /// External function signatures: name → (param types, optional return type)
+    pub external_fns: HashMap<String, (Vec<Ty>, Option<Ty>)>,
 }
 
 impl Default for TypeEnv {
@@ -25,6 +29,8 @@ impl TypeEnv {
         Self {
             type_defs: HashMap::new(),
             scopes: vec![HashMap::new()],
+            constants: HashMap::new(),
+            external_fns: HashMap::new(),
         }
     }
 
@@ -34,6 +40,34 @@ impl TypeEnv {
             if let Item::TypeDef(td) = &item.node {
                 let ty = self.resolve_type_def(td, diagnostics);
                 self.type_defs.insert(td.name.node.clone(), ty);
+            }
+        }
+    }
+
+    /// Collect all `const` declarations from the source file.
+    pub fn collect_constants(&mut self, source: &SourceFile) {
+        for item in &source.items {
+            if let Item::Const(cd) = &item.node {
+                self.constants.insert(cd.name.node.clone(), cd.value);
+            }
+        }
+    }
+
+    /// Collect all `external fn` declarations from the source file.
+    pub fn collect_external_fns(&mut self, source: &SourceFile, diagnostics: &mut Vec<Diagnostic>) {
+        for item in &source.items {
+            if let Item::ExternalFn(ef) = &item.node {
+                let param_tys: Vec<Ty> = ef
+                    .params
+                    .iter()
+                    .map(|(_, ty)| self.resolve_type_expr(&ty.node, diagnostics))
+                    .collect();
+                let ret_ty = ef
+                    .return_ty
+                    .as_ref()
+                    .map(|ty| self.resolve_type_expr(&ty.node, diagnostics));
+                self.external_fns
+                    .insert(ef.name.node.clone(), (param_tys, ret_ty));
             }
         }
     }

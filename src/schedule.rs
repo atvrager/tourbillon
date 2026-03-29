@@ -228,6 +228,9 @@ fn collect_expr_resources(
             collect_expr_resources(&index.node, resources, port_map);
             collect_expr_resources(&value.node, resources, port_map);
         }
+        Expr::BitSlice { expr: inner, .. } => {
+            collect_expr_resources(&inner.node, resources, port_map);
+        }
         Expr::Lit(_) | Expr::Var(_) | Expr::MethodCall { .. } => {}
     }
 }

@@ -6,6 +6,12 @@
 use std::path::Path;
 use std::process::Command;
 
+fn num_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
 fn check_tool(name: &str) -> bool {
     Command::new("which")
         .arg(name)
@@ -53,9 +59,16 @@ fn rv32ui_compliance() {
         .expect("failed to run build_tests.sh");
     assert!(status.success(), "build_tests.sh failed");
 
-    // Clean and build simulation
+    // Clean first, then build with parallelism
     let status = Command::new("make")
-        .args(["clean", "build"])
+        .arg("clean")
+        .current_dir(&sim_dir)
+        .status()
+        .expect("failed to run make clean");
+    assert!(status.success(), "make clean failed");
+
+    let status = Command::new("make")
+        .args(["build", &format!("-j{}", num_cpus())])
         .current_dir(&sim_dir)
         .status()
         .expect("failed to run make build");

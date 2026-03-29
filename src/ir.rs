@@ -18,6 +18,10 @@ pub struct ProcessNetwork {
     pub domains: Vec<String>,
     /// Instance name → domain name (None = default domain using clk/rst_n).
     pub domain_map: HashMap<String, Option<String>>,
+    /// Compile-time constants: name → value (from `const` declarations).
+    pub constants: HashMap<String, u64>,
+    /// External function signatures: name → (param types, optional return type).
+    pub external_fns: HashMap<String, (Vec<Ty>, Option<Ty>)>,
 }
 
 /// A process instance node in the graph.

@@ -20,8 +20,10 @@ pub fn check(source: &SourceFile) -> (TypeEnv, Vec<Diagnostic>) {
     let mut diagnostics = vec![];
     let mut env = TypeEnv::new();
 
-    // First pass: collect type definitions
+    // First pass: collect type definitions, constants, and external fn signatures
     env.collect_type_defs(source, &mut diagnostics);
+    env.collect_constants(source);
+    env.collect_external_fns(source, &mut diagnostics);
 
     // Second pass: check each process
     for item in &source.items {
@@ -32,7 +34,7 @@ pub fn check(source: &SourceFile) -> (TypeEnv, Vec<Diagnostic>) {
             Item::Pipe(pipe) => {
                 check_pipe(pipe, &env, &mut diagnostics);
             }
-            Item::TypeDef(_) => {} // Already processed
+            Item::TypeDef(_) | Item::Const(_) | Item::ExternalFn(_) => {} // Already processed
         }
     }
 

@@ -30,6 +30,23 @@ pub enum Item {
     TypeDef(TypeDef),
     Process(Process),
     Pipe(Pipe),
+    Const(ConstDef),
+    ExternalFn(ExternalFnDef),
+}
+
+/// `const NAME = <int-literal>`
+#[derive(Debug, Clone)]
+pub struct ConstDef {
+    pub name: Spanned<String>,
+    pub value: u64,
+}
+
+/// `external fn name(params) [-> RetTy]`
+#[derive(Debug, Clone)]
+pub struct ExternalFnDef {
+    pub name: Spanned<String>,
+    pub params: Vec<(Spanned<String>, Spanned<TypeExpr>)>,
+    pub return_ty: Option<Spanned<TypeExpr>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +242,12 @@ pub enum Expr {
     Call {
         func: String,
         args: Vec<Spanned<Expr>>,
+    },
+    /// `expr[hi:lo]` bit slice
+    BitSlice {
+        expr: Box<Spanned<Expr>>,
+        hi: u64,
+        lo: u64,
     },
     /// Binary operation
     BinOp {

@@ -345,6 +345,13 @@ where
                     .or_not(),
             );
 
+        // Bit slice: [int : int]
+        let bit_slice_postfix = just(Token::LBrack)
+            .ignore_then(select! { Token::Int(hi) => hi })
+            .then_ignore(just(Token::Colon))
+            .then(select! { Token::Int(lo) => lo })
+            .then_ignore(just(Token::RBrack));
+
         let index_postfix = expr
             .clone()
             .then(just(Token::ColonEq).ignore_then(expr.clone()).or_not())
@@ -354,10 +361,12 @@ where
         enum Postfix {
             Dot(Spanned<String>, Option<Vec<Spanned<Expr>>>),
             Index(Spanned<Expr>, Option<Spanned<Expr>>),
+            BitSlice(u64, u64),
         }
 
         let postfix_op = choice((
             dot_postfix.map(|(name, args)| Postfix::Dot(name, args)),
+            bit_slice_postfix.map(|(hi, lo)| Postfix::BitSlice(hi, lo)),
             index_postfix.map(|(idx, upd)| Postfix::Index(idx, upd)),
         ));
 
@@ -401,6 +410,17 @@ where
                         Expr::Index {
                             expr: Box::new(lhs),
                             index: Box::new(index),
+                        },
+                        span,
+                    )
+                }
+                Postfix::BitSlice(hi, lo) => {
+                    let span = lhs.span.start..lhs.span.end + 10; // approximate
+                    Spanned::new(
+                        Expr::BitSlice {
+                            expr: Box::new(lhs),
+                            hi,
+                            lo,
                         },
                         span,
                     )
@@ -945,7 +965,43 @@ pub fn source_file_parser<'src, I>()
 where
     I: ValueInput<'src, Token = Token<'src>, Span = Span>,
 {
+    let ident_sp =
+        select! { Token::Ident(s) => s }.map_with(|s: &str, e| spn(s.to_string(), e.span()));
+
+    // const NAME = <int>
+    let const_def = just(Token::Const)
+        .ignore_then(ident_sp)
+        .then_ignore(just(Token::Assign))
+        .then(select! { Token::Int(n) => n })
+        .map(|(name, value)| Item::Const(ConstDef { name, value }));
+
+    // external fn name(params) [-> RetTy]
+    let ext_param = ident_sp
+        .then_ignore(just(Token::Colon))
+        .then(type_expr_parser());
+
+    let external_fn_def = just(Token::External)
+        .ignore_then(just(Token::Fn))
+        .ignore_then(ident_sp)
+        .then(
+            ext_param
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        )
+        .then(just(Token::MapsTo).ignore_then(type_expr_parser()).or_not())
+        .map(|((name, params), return_ty)| {
+            Item::ExternalFn(ExternalFnDef {
+                name,
+                params,
+                return_ty,
+            })
+        });
+
     let item = choice((
+        const_def,
+        external_fn_def,
         process_parser().map(Item::Process),
         pipe_parser().map(Item::Pipe),
         type_def_parser().map(Item::TypeDef),

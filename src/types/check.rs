@@ -29,6 +29,8 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
             }
             if let Some(ty) = env.lookup(name) {
                 ty.clone()
+            } else if env.constants.contains_key(name) {
+                Ty::Bits(32)
             } else {
                 diagnostics.push(Diagnostic::error(
                     expr.span.clone(),
@@ -229,13 +231,27 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
         }
 
         Expr::Call { func, args } => {
-            // Check arg types (for diagnostics), but we don't have function signatures yet
-            for arg in args {
-                check_expr(arg, env, diagnostics);
-            }
+            // Check arg types (for diagnostics)
+            let arg_tys: Vec<Ty> = args
+                .iter()
+                .map(|a| check_expr(a, env, diagnostics))
+                .collect();
             if func == "Some" && args.len() == 1 {
-                let inner_ty = check_expr(&args[0], env, diagnostics);
-                return Ty::Option(Box::new(inner_ty));
+                return Ty::Option(Box::new(arg_tys.into_iter().next().unwrap()));
+            }
+            // Check external function signatures
+            if let Some((param_tys, ret_ty)) = env.external_fns.get(func) {
+                if args.len() != param_tys.len() {
+                    diagnostics.push(Diagnostic::error(
+                        expr.span.clone(),
+                        format!(
+                            "`{func}` expects {} arguments, got {}",
+                            param_tys.len(),
+                            args.len()
+                        ),
+                    ));
+                }
+                return ret_ty.clone().unwrap_or(Ty::Bits(0));
             }
             // Unknown function — return Error for now
             Ty::Error
@@ -284,6 +300,37 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
                 diagnostics.push(Diagnostic::error(
                     0..0,
                     format!("undefined record type `{name}`"),
+                ));
+                Ty::Error
+            }
+        }
+
+        Expr::BitSlice {
+            expr: inner,
+            hi,
+            lo,
+        } => {
+            let ty = check_expr(inner, env, diagnostics);
+            if let Ty::Bits(n) = ty {
+                if *hi >= n {
+                    diagnostics.push(Diagnostic::error(
+                        inner.span.clone(),
+                        format!("bit slice hi={hi} out of range for Bits {n}"),
+                    ));
+                }
+                if lo > hi {
+                    diagnostics.push(Diagnostic::error(
+                        inner.span.clone(),
+                        format!("bit slice lo={lo} > hi={hi}"),
+                    ));
+                }
+                Ty::Bits(hi - lo + 1)
+            } else if ty == Ty::Error {
+                Ty::Error
+            } else {
+                diagnostics.push(Diagnostic::error(
+                    inner.span.clone(),
+                    format!("bit slice on non-Bits type `{ty}`"),
                 ));
                 Ty::Error
             }

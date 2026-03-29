@@ -81,7 +81,7 @@ pub fn desugar(mut source: SourceFile, diagnostics: &mut Vec<Diagnostic>) -> Sou
                 // Expand array port bindings in pipe instances
                 expand_pipe_array_bindings(pipe, &process_array_ports);
             }
-            Item::TypeDef(_) => {}
+            Item::TypeDef(_) | Item::Const(_) | Item::ExternalFn(_) => {}
         }
     }
     // Insert generated processes before the pipes that use them
@@ -575,6 +575,15 @@ fn desugar_expr(
             expr: Box::new(desugar_expr(inner, array_ports, diagnostics)),
             index: Box::new(desugar_expr(index, array_ports, diagnostics)),
             value: Box::new(desugar_expr(value, array_ports, diagnostics)),
+        },
+        Expr::BitSlice {
+            expr: inner,
+            hi,
+            lo,
+        } => Expr::BitSlice {
+            expr: Box::new(desugar_expr(inner, array_ports, diagnostics)),
+            hi: *hi,
+            lo: *lo,
         },
         // Atoms — no transformation needed
         Expr::Lit(_)

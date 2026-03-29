@@ -62,6 +62,8 @@ pub fn lexer<'src>()
             "state" => Token::State,
             "peeks" => Token::Peeks,
             "external" => Token::External,
+            "const" => Token::Const,
+            "fn" => Token::Fn,
             "Queue" => Token::Queue,
             "Cell" => Token::Cell,
             "Memory" => Token::Memory,
