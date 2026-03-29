@@ -224,7 +224,7 @@ fn elaborate_pipe_inner(
                 );
             }
 
-            // Merge child graph edges, remapping node indices
+            // Merge child graph edges, remapping node indices and peeker names
             let mut child_edge_map: HashMap<EdgeIndex, EdgeIndex> = HashMap::new();
             for child_edge_idx in child_net.graph.edge_indices() {
                 let child_edge = &child_net.graph[child_edge_idx];
@@ -233,6 +233,17 @@ fn elaborate_pipe_inner(
                 let new_dst = child_node_map[&dst];
                 let mut edge = child_edge.clone();
                 edge.name = format!("{}_{}", inst_prefix, edge.name);
+                // Prefix peeker instance names for Cell edges
+                if let QueueEdgeKind::Cell {
+                    ref mut peeker_instances,
+                    ..
+                } = edge.kind
+                {
+                    *peeker_instances = peeker_instances
+                        .iter()
+                        .map(|p| format!("{}_{}", inst_prefix, p))
+                        .collect();
+                }
                 let new_edge_idx = graph.add_edge(new_src, new_dst, edge);
                 child_edge_map.insert(child_edge_idx, new_edge_idx);
             }
@@ -963,6 +974,14 @@ fn elaborate_pipe_inner(
         for edge_idx in graph.edge_indices() {
             let edge = &graph[edge_idx];
             let (src_node, dst_node) = graph.edge_endpoints(edge_idx).unwrap();
+
+            // Skip edges involving memory stubs — they're replaced by external
+            // memory modules in the testbench and always operate in the same domain
+            // as the process that uses them.
+            if graph[src_node].is_memory_stub || graph[dst_node].is_memory_stub {
+                continue;
+            }
+
             let src_inst = &graph[src_node].instance_name;
             let dst_inst = &graph[dst_node].instance_name;
             let src_domain = domain_map.get(src_inst).cloned().flatten();
