@@ -1,0 +1,45 @@
+-- Conditional logic: route values to different outputs based on a flag.
+process Router {
+    consumes: input : Queue(Bits 32)
+    produces: high  : Queue(Bits 32)
+    produces: low   : Queue(Bits 32)
+    rule go {
+        let x = input.take()
+        if x > 100 {
+            high.put(x)
+        } else {
+            low.put(x)
+        }
+    }
+}
+
+process Source {
+    produces: out : Queue(Bits 32)
+    rule go {
+        out.put(50)
+    }
+}
+
+process SinkHigh {
+    consumes: input : Queue(Bits 32)
+    rule go {
+        let x = input.take()
+    }
+}
+
+process SinkLow {
+    consumes: input : Queue(Bits 32)
+    rule go {
+        let x = input.take()
+    }
+}
+
+pipe Top {
+    let data = Queue(Bits 32, depth = 2)
+    let hi   = Queue(Bits 32, depth = 2)
+    let lo   = Queue(Bits 32, depth = 2)
+    Source   { out = data }
+    Router   { input = data, high = hi, low = lo }
+    SinkHigh { input = hi }
+    SinkLow  { input = lo }
+}

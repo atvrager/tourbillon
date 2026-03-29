@@ -1,0 +1,16 @@
+-- Two conflicting rules on the same Cell: inc has higher priority than dec.
+process Counter {
+    state: count : Cell(Bits 32, init = 0)
+    rule inc {
+        let c = count.take()
+        count.put(c + 1)
+    }
+    rule dec {
+        let c = count.take()
+        count.put(c - 1)
+    }
+}
+
+pipe Top {
+    Counter {}
+}

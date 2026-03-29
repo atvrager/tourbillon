@@ -490,7 +490,12 @@ fn elaborate_pipe(
         }
     }
 
-    // Fix up edge endpoints now that we know writers and readers
+    // Fix up edge endpoints now that we know writers and readers.
+    //
+    // petgraph uses swap_remove internally, so removing edges one-at-a-time
+    // causes index reuse that corrupts later lookups. Instead: collect all
+    // edges to relocate, remove them all first, then re-add in batch.
+    let mut to_relocate: Vec<(EdgeIndex, NodeIndex, NodeIndex, EdgeIndex)> = vec![];
     for (queue_name, pending) in &pending_edges {
         if queue_name.contains('.') {
             continue; // Self-loops already have correct endpoints
@@ -499,20 +504,38 @@ fn elaborate_pipe(
             && let (Some(&src_node), Some(&dst_node)) =
                 (instances.get(writer), instances.get(reader))
         {
-            // Update the edge endpoints
-            // petgraph doesn't support changing endpoints, so we remove and re-add
-            let edge_data = graph.remove_edge(pending.edge_idx);
-            if let Some(edge_data) = edge_data {
-                let new_idx = graph.add_edge(src_node, dst_node, edge_data);
-                // Update port bindings that reference the old edge index
-                for node_idx in [src_node, dst_node] {
-                    let node = &mut graph[node_idx];
-                    for port in &mut node.ports {
-                        if port.bound_to == Some(pending.edge_idx) {
-                            port.bound_to = Some(new_idx);
-                        }
-                    }
-                }
+            to_relocate.push((pending.edge_idx, src_node, dst_node, pending.edge_idx));
+        }
+    }
+
+    // Sort by edge index descending so removals don't shift earlier indices
+    // (petgraph swaps the last edge into the removed slot).
+    to_relocate.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Remove all, collecting edge data
+    let mut removed: Vec<(QueueEdge, NodeIndex, NodeIndex, EdgeIndex)> = vec![];
+    for (edge_idx, src_node, dst_node, old_idx) in &to_relocate {
+        if let Some(edge_data) = graph.remove_edge(*edge_idx) {
+            removed.push((edge_data, *src_node, *dst_node, *old_idx));
+        }
+    }
+
+    // Re-add with correct endpoints, building old→new index map
+    let mut index_map: HashMap<EdgeIndex, EdgeIndex> = HashMap::new();
+    for (edge_data, src_node, dst_node, old_idx) in removed {
+        let new_idx = graph.add_edge(src_node, dst_node, edge_data);
+        index_map.insert(old_idx, new_idx);
+    }
+
+    // Apply index mapping to all port bindings in a single pass
+    // (avoids collisions from incremental updates)
+    for node_idx in graph.node_indices().collect::<Vec<_>>() {
+        let node = &mut graph[node_idx];
+        for port in &mut node.ports {
+            if let Some(old) = port.bound_to
+                && let Some(&new) = index_map.get(&old)
+            {
+                port.bound_to = Some(new);
             }
         }
     }

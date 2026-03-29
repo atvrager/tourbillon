@@ -1,0 +1,12 @@
+-- Simple 32-bit counter using a single Cell.
+process Counter {
+    state: count : Cell(Bits 32, init = 0)
+    rule tick {
+        let c = count.take()
+        count.put(c + 1)
+    }
+}
+
+pipe Top {
+    Counter {}
+}

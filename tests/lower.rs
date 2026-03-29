@@ -1,4 +1,90 @@
+use std::path::Path;
+
 /// Integration tests for the lowering stage.
+
+// ---------------------------------------------------------------------------
+// Golden file comparison tests
+// ---------------------------------------------------------------------------
+
+/// Compile an example .tbn, compare every generated file against its golden .sv.
+fn check_golden(example_name: &str) {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tbn_path = manifest_dir
+        .join("examples")
+        .join(format!("{example_name}.tbn"));
+    let golden_dir = manifest_dir.join("examples/golden").join(example_name);
+
+    let src = std::fs::read_to_string(&tbn_path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", tbn_path.display()));
+
+    let files = tbn::build(&src, tbn_path.to_str().unwrap()).unwrap_or_else(|_| {
+        panic!("{example_name}.tbn failed to compile");
+    });
+
+    // Every golden file must be produced, and every produced file must match.
+    let mut golden_files: Vec<String> = std::fs::read_dir(&golden_dir)
+        .unwrap_or_else(|e| panic!("cannot read golden dir {}: {e}", golden_dir.display()))
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.ends_with(".sv") {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    golden_files.sort();
+
+    let mut produced_names: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+    produced_names.sort();
+
+    assert_eq!(
+        produced_names, golden_files,
+        "{example_name}: produced files != golden files"
+    );
+
+    for file in &files {
+        let golden_path = golden_dir.join(&file.name);
+        let expected = std::fs::read_to_string(&golden_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", golden_path.display()));
+        assert_eq!(
+            file.content, expected,
+            "{example_name}/{}: output differs from golden.\n\
+             --- To update golden files, run: cargo run -- build examples/{example_name}.tbn -o examples/golden/{example_name}/",
+            file.name
+        );
+    }
+}
+
+#[test]
+fn golden_counter() {
+    check_golden("counter");
+}
+
+#[test]
+fn golden_producer_consumer() {
+    check_golden("producer_consumer");
+}
+
+#[test]
+fn golden_priority() {
+    check_golden("priority");
+}
+
+#[test]
+fn golden_peek() {
+    check_golden("peek");
+}
+
+#[test]
+fn golden_branch() {
+    check_golden("branch");
+}
+
+// ---------------------------------------------------------------------------
+// Structural assertion tests
+// ---------------------------------------------------------------------------
 
 #[test]
 fn counter_generates_sv() {
