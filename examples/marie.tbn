@@ -68,7 +68,8 @@ record ExecStash {
 -- External functions
 -- ============================================================
 
-external fn uart_tx(ch : Bits 8)
+-- Baud rate divisor: 100 MHz / 3 MBaud ≈ 33
+const BAUD_DIV = 33
 
 -- ============================================================
 -- CPU pipeline stages (from rv32i.tbn)
@@ -200,7 +201,7 @@ process Execute {
             if s.phase == 1 {
                 match dmem_read_resp.try_take() {
                     Some(raw_word) => {
-                        let val = load_extend(s.funct3, raw_word, s.result & 3)
+                        let val = load_extend(s.funct3, raw_word, s.result[1:0])
                         writeback.put((true, s.rd, val))
                         next_pc.put(s.next_pc)
                         stash.put(ExecStash {
@@ -216,7 +217,7 @@ process Execute {
                 if s.phase == 2 {
                     match dmem_read_resp.try_take() {
                         Some(old_word) => {
-                            let merged = store_merge(s.funct3, old_word, s.rs2_val, s.result & 3)
+                            let merged = store_merge(s.funct3, old_word, s.rs2_val, s.result[1:0])
                             dmem_write_req.put((s.result, merged))
                             writeback.put((false, s.rd, s.result))
                             next_pc.put(s.next_pc)
@@ -451,22 +452,188 @@ process MemDevice {
 }
 
 -- ============================================================
--- UART device: BusReq/BusResp → DPI uart_tx
+-- UART device: BusReq/BusResp → tx_data/rx_data queues
 -- ============================================================
+-- Register map:
+--   Write any offset → enqueue data[7:0] into TX FIFO
+--   Read  any offset → dequeue byte from RX FIFO (0 if empty)
 
 process UartDevice {
-    consumes: req  : Queue(BusReq)
-    produces: resp : Queue(BusResp)
+    consumes: req      : Queue(BusReq)
+    produces: resp     : Queue(BusResp)
+    produces: tx_data  : Queue(Bits 8)
+    consumes: rx_data  : Queue(Bits 8)
 
     rule handle {
         let r = req.take()
         if r.we {
-            uart_tx(r.data[7:0])
+            tx_data.put(r.data[7:0])
             resp.put(0)
         } else {
-            resp.put(1)
+            match rx_data.try_take() {
+                Some(byte) => { resp.put(byte) }
+                None => { resp.put(0) }
+            }
         }
     }
+}
+
+-- ============================================================
+-- UART TX: shift register serializer
+-- ============================================================
+-- Idle line = all 1s. Frame = {stop=1, data[7:0], start=0}.
+-- Shifts right, outputting LSB first (UART standard).
+-- Each bit held for BAUD_DIV+1 clock cycles.
+
+process UartTx {
+    consumes: tx_data  : Queue(Bits 8)
+    state:    sr       : Cell(Bits 10, init = 0x3FF)
+    state:    baud_cnt : Cell(Bits 16, init = 0)
+    state:    bit_cnt  : Cell(Bits 4, init = 0)
+    produces: tx_pin   : Queue(Bits 1)
+
+    rule tick {
+        let s = sr.take()
+        let bc = baud_cnt.take()
+        let bn = bit_cnt.take()
+        tx_pin.put(s[0:0])
+
+        if bn == 0 {
+            match tx_data.try_take() {
+                Some(byte) => {
+                    sr.put(0x200 | (byte << 1))
+                    baud_cnt.put(BAUD_DIV)
+                    bit_cnt.put(10)
+                }
+                None => {
+                    sr.put(s)
+                    baud_cnt.put(0)
+                    bit_cnt.put(0)
+                }
+            }
+        } else {
+            if bc == 0 {
+                sr.put((s >> 1) | 0x200)
+                baud_cnt.put(BAUD_DIV)
+                bit_cnt.put(bn - 1)
+            } else {
+                sr.put(s)
+                baud_cnt.put(bc - 1)
+                bit_cnt.put(bn)
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- UART RX: bit deserializer with synchronizer
+-- ============================================================
+-- Phase-based state machine:
+--   0 = IDLE (wait for start bit)
+--   1 = START (confirm at mid-bit)
+--   2 = DATA (sample 8 bits)
+--   3 = STOP (return to idle)
+
+process UartRx {
+    produces: rx_data  : Queue(Bits 8)
+    state:    rx_ph    : Cell(Bits 2, init = 0)
+    state:    rx_sr    : Cell(Bits 8, init = 0)
+    state:    rx_bc    : Cell(Bits 16, init = 0)
+    state:    rx_bn    : Cell(Bits 4, init = 0)
+    consumes: rx_pin   : Queue(Bits 1)
+    produces: rts_pin  : Queue(Bits 1)
+
+    rule tick {
+        let ph = rx_ph.take()
+        let sr = rx_sr.take()
+        let bc = rx_bc.take()
+        let bn = rx_bn.take()
+        rts_pin.put(0)
+
+        match rx_pin.try_take() {
+            Some(bit) => {
+                if ph == 0 {
+                    if bit == 0 {
+                        rx_ph.put(1)
+                        rx_bc.put(BAUD_DIV >> 1)
+                        rx_bn.put(0)
+                        rx_sr.put(0)
+                    } else {
+                        rx_ph.put(0)
+                        rx_bc.put(0)
+                        rx_bn.put(0)
+                        rx_sr.put(0)
+                    }
+                } else {
+                    if bc == 0 {
+                        if ph == 1 {
+                            if bit == 0 {
+                                rx_ph.put(2)
+                                rx_bc.put(BAUD_DIV)
+                                rx_bn.put(0)
+                                rx_sr.put(0)
+                            } else {
+                                rx_ph.put(0)
+                                rx_bc.put(0)
+                                rx_bn.put(0)
+                                rx_sr.put(0)
+                            }
+                        } else {
+                            if ph == 2 {
+                                if bn == 7 {
+                                    rx_data.put((sr >> 1) | (bit << 7))
+                                    rx_ph.put(3)
+                                    rx_bc.put(BAUD_DIV)
+                                    rx_bn.put(0)
+                                    rx_sr.put(0)
+                                } else {
+                                    rx_ph.put(2)
+                                    rx_bc.put(BAUD_DIV)
+                                    rx_bn.put(bn + 1)
+                                    rx_sr.put((sr >> 1) | (bit << 7))
+                                }
+                            } else {
+                                rx_ph.put(0)
+                                rx_bc.put(0)
+                                rx_bn.put(0)
+                                rx_sr.put(0)
+                            }
+                        }
+                    } else {
+                        rx_ph.put(ph)
+                        rx_bc.put(bc - 1)
+                        rx_bn.put(bn)
+                        rx_sr.put(sr)
+                    }
+                }
+            }
+            None => {
+                rx_ph.put(ph)
+                rx_bc.put(bc)
+                rx_bn.put(bn)
+                rx_sr.put(sr)
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- UART PHY pipe: wires device, TX, and RX together
+-- ============================================================
+
+pipe UartPhy {
+    let uart_req  = Queue(BusReq, depth = 1)
+    let uart_resp = Queue(BusResp, depth = 1)
+    let tx_q      = Queue(Bits 8, depth = 16)
+    let rx_q      = Queue(Bits 8, depth = 2)
+
+    let tx_pin  = external Queue(Bits 1, depth = 1)
+    let rx_pin  = external Queue(Bits 1, depth = 1)
+    let rts_pin = external Queue(Bits 1, depth = 1)
+
+    UartDevice { req = uart_req, resp = uart_resp, tx_data = tx_q, rx_data = rx_q }
+    UartTx { tx_data = tx_q, tx_pin = tx_pin }
+    UartRx { rx_data = rx_q, rx_pin = rx_pin, rts_pin = rts_pin }
 }
 
 -- ============================================================
@@ -533,9 +700,9 @@ pipe Marie {
         mem_wr_req  = dev_mem_write_req
     }
 
-    -- UART device (dev domain)
-    UartDevice [dev] {
-        req  = uart_bus_req,
-        resp = uart_bus_resp
+    -- UART PHY (dev domain) — physical TX/RX pins exposed as module ports
+    UartPhy [dev] {
+        uart_req  = uart_bus_req,
+        uart_resp = uart_bus_resp
     }
 }

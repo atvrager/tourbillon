@@ -37,13 +37,13 @@ module tbn_fifo #(
         end else begin
             if (do_enq) begin
                 storage[wr_ptr] <= enq_data;
-                if (wr_ptr == DEPTH - 1)
+                if (wr_ptr == AWIDTH'(DEPTH - 1))
                     wr_ptr <= '0;
                 else
                     wr_ptr <= wr_ptr + 1;
             end
             if (do_deq) begin
-                if (rd_ptr == DEPTH - 1)
+                if (rd_ptr == AWIDTH'(DEPTH - 1))
                     rd_ptr <= '0;
                 else
                     rd_ptr <= rd_ptr + 1;

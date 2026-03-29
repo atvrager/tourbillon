@@ -48,8 +48,32 @@ fn check_golden(example_name: &str) {
         let golden_path = golden_dir.join(&file.name);
         let expected = std::fs::read_to_string(&golden_path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", golden_path.display()));
+        // Strip provenance lines and normalize double-blank lines.
+        // Golden files from `tbn build` contain provenance; tests use None.
+        let strip_provenance = |s: &str| -> String {
+            let filtered: Vec<&str> = s
+                .lines()
+                .filter(|l| !l.contains("Tourbillon provenance:") && !l.contains("TBN_PROVENANCE"))
+                .collect();
+            // Collapse runs of blank lines into a single blank line
+            let mut result = String::new();
+            let mut prev_blank = false;
+            for line in filtered {
+                let is_blank = line.trim().is_empty();
+                if is_blank && prev_blank {
+                    continue;
+                }
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(line);
+                prev_blank = is_blank;
+            }
+            result
+        };
         assert_eq!(
-            file.content, expected,
+            strip_provenance(&file.content),
+            strip_provenance(&expected),
             "{example_name}/{}: output differs from golden.\n\
              --- To update golden files, run: cargo run -- build examples/{example_name}.tbn -o examples/golden/{example_name}/",
             file.name

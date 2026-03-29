@@ -395,6 +395,7 @@ fn elaborate_pipe_inner(
             depth,
             kind: QueueEdgeKind::Queue {
                 init_tokens: decl.init_tokens.unwrap_or(0),
+                is_external: decl.is_external,
             },
             span: decl.name.span.clone(),
         };
@@ -767,6 +768,14 @@ fn elaborate_pipe_inner(
             .and_then(|(r, _)| instances.get(r))
             .copied();
 
+        let is_external = matches!(
+            &pending.edge_data.kind,
+            QueueEdgeKind::Queue {
+                is_external: true,
+                ..
+            }
+        );
+
         match (writer_node, reader_node) {
             (Some(src), Some(dst)) => {
                 let edge_idx = graph.add_edge(src, dst, pending.edge_data.clone());
@@ -780,6 +789,36 @@ fn elaborate_pipe_inner(
             (None, Some(node)) if allow_dangling => {
                 // Dangling: only reader. Create self-loop; parent will rewire.
                 let edge_idx = graph.add_edge(node, node, pending.edge_data.clone());
+                queue_edge_map.insert(queue_name.clone(), edge_idx);
+            }
+            (Some(src), None) if is_external => {
+                // External queue: writer exists, create stub for consumer side.
+                let stub = ProcessNode {
+                    instance_name: format!("_Ext_{queue_name}"),
+                    process_name: format!("_Ext_{queue_name}"),
+                    rules: vec![],
+                    ports: vec![],
+                    span: pending.decl_span.clone(),
+                    is_memory_stub: true,
+                };
+                let stub_idx = graph.add_node(stub);
+                instances.insert(format!("_Ext_{queue_name}"), stub_idx);
+                let edge_idx = graph.add_edge(src, stub_idx, pending.edge_data.clone());
+                queue_edge_map.insert(queue_name.clone(), edge_idx);
+            }
+            (None, Some(dst)) if is_external => {
+                // External queue: reader exists, create stub for producer side.
+                let stub = ProcessNode {
+                    instance_name: format!("_Ext_{queue_name}"),
+                    process_name: format!("_Ext_{queue_name}"),
+                    rules: vec![],
+                    ports: vec![],
+                    span: pending.decl_span.clone(),
+                    is_memory_stub: true,
+                };
+                let stub_idx = graph.add_node(stub);
+                instances.insert(format!("_Ext_{queue_name}"), stub_idx);
+                let edge_idx = graph.add_edge(stub_idx, dst, pending.edge_data.clone());
                 queue_edge_map.insert(queue_name.clone(), edge_idx);
             }
             _ => {} // Missing both — skip
@@ -989,7 +1028,14 @@ fn elaborate_pipe_inner(
             continue;
         }
 
-        if !allow_dangling {
+        let is_ext = matches!(
+            &pending.edge_data.kind,
+            QueueEdgeKind::Queue {
+                is_external: true,
+                ..
+            }
+        );
+        if !allow_dangling && !is_ext {
             if pending.writer.is_none() {
                 diagnostics.push(Diagnostic::error(
                     pending.decl_span.clone(),

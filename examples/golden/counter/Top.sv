@@ -3,6 +3,9 @@ module Top (
     input  wire rst_n
 );
 
+    // Tourbillon provenance: 3d45af0d2486b96ddee741146f65f451ea742a5d34828b3c3ca7b1db6fae66d8
+    localparam logic [255:0] TBN_PROVENANCE = 256'h3d45af0d2486b96ddee741146f65f451ea742a5d34828b3c3ca7b1db6fae66d8;
+
     // Cell: Counter.count
     logic [31:0] c_Counter_count_q;
     logic [31:0] c_Counter_count_d;
@@ -11,6 +14,7 @@ module Top (
     wire r_Counter_tick_can_fire = 1'b1;
     wire r_Counter_tick_will_fire = r_Counter_tick_can_fire;
 
+    /* verilator lint_off LATCH */  // all signals have explicit defaults above
     always_comb begin
         c_Counter_count_d = c_Counter_count_q;
         c_Counter_count_en = 1'b0;

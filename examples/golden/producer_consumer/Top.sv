@@ -3,6 +3,9 @@ module Top (
     input  wire rst_n
 );
 
+    // Tourbillon provenance: 5e300462b3e9bb974350af1a391161e9cf6c751e5ecd8ffc22726a2d77af11ba
+    localparam logic [255:0] TBN_PROVENANCE = 256'h5e300462b3e9bb974350af1a391161e9cf6c751e5ecd8ffc22726a2d77af11ba;
+
     // Queue: q
     logic        q_q_enq_valid;
     wire         q_q_enq_ready;
@@ -28,6 +31,7 @@ module Top (
     wire r_Consumer_go_can_fire = q_q_deq_valid;
     wire r_Consumer_go_will_fire = r_Consumer_go_can_fire;
 
+    /* verilator lint_off LATCH */  // all signals have explicit defaults above
     always_comb begin
         q_q_enq_valid = 1'b0;
         q_q_enq_data = '0;

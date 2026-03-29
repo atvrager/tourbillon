@@ -89,13 +89,13 @@ fn fifo_module_sv() -> &'static str {
         end else begin
             if (do_enq) begin
                 storage[wr_ptr] <= enq_data;
-                if (wr_ptr == DEPTH - 1)
+                if (wr_ptr == AWIDTH'(DEPTH - 1))
                     wr_ptr <= '0;
                 else
                     wr_ptr <= wr_ptr + 1;
             end
             if (do_deq) begin
-                if (rd_ptr == DEPTH - 1)
+                if (rd_ptr == AWIDTH'(DEPTH - 1))
                     rd_ptr <= '0;
                 else
                     rd_ptr <= rd_ptr + 1;
@@ -210,6 +210,16 @@ fn width_decl(width: u64) -> String {
         String::new()
     } else {
         format!("[{}:0] ", width - 1)
+    }
+}
+
+/// Wrap an SV expression in a width cast `W'(expr)` to match the target width.
+/// Avoids redundant casts for plain literals and already-matching widths.
+fn width_cast(expr: &str, target_width: u64) -> String {
+    if target_width <= 1 {
+        expr.to_string()
+    } else {
+        format!("{target_width}'({expr})")
     }
 }
 
@@ -569,12 +579,37 @@ impl<'a> SvEmitter<'a> {
         }
 
         for edge_idx in net.network.graph.edge_indices() {
+            let edge = &net.network.graph[edge_idx];
+
+            // Memory stub edges
             if let Some((src, dst)) = net.network.graph.edge_endpoints(edge_idx)
                 && (memory_stub_nodes.contains(&src) || memory_stub_nodes.contains(&dst))
             {
                 // CPU is writer if the memory stub is the destination (consumer)
                 let cpu_is_writer = memory_stub_nodes.contains(&dst);
                 memory_edges.insert(edge_idx, cpu_is_writer);
+                continue;
+            }
+
+            // External queue edges (self-loops or directed edges with is_external flag)
+            if let QueueEdgeKind::Queue {
+                is_external: true, ..
+            } = &edge.kind
+            {
+                // Determine direction by checking port kinds that reference this edge
+                let mut has_writer = false;
+                for node_idx in net.network.graph.node_indices() {
+                    let node = &net.network.graph[node_idx];
+                    for port in &node.ports {
+                        if port.bound_to == Some(edge_idx)
+                            && matches!(port.kind, PortKind::Produces)
+                        {
+                            has_writer = true;
+                        }
+                    }
+                }
+                // cpu_is_writer=true means internal process writes → expose enq side as output
+                memory_edges.insert(edge_idx, has_writer);
             }
         }
 
@@ -961,7 +996,7 @@ impl<'a> SvEmitter<'a> {
             let fifo_clk = self.clock_for_instance(&self.net.network.graph[fifo_src].instance_name);
             let fifo_rst = self.reset_for_instance(&self.net.network.graph[fifo_src].instance_name);
             let init_value = match &edge.kind {
-                QueueEdgeKind::Queue { init_tokens } if *init_tokens > 0 => Some(*init_tokens),
+                QueueEdgeKind::Queue { init_tokens, .. } if *init_tokens > 0 => Some(*init_tokens),
                 _ => None,
             };
             if let Some(val) = init_value {
@@ -1138,6 +1173,7 @@ impl<'a> SvEmitter<'a> {
             return;
         }
 
+        self.line("/* verilator lint_off LATCH */  // all signals have explicit defaults above");
         self.line("always_comb begin");
         self.indent();
 
@@ -1384,13 +1420,21 @@ impl<'a> SvEmitter<'a> {
                 if let Some(&edge_idx) = ctx.port_edges.get(&target.node) {
                     let edge = &self.net.network.graph[edge_idx];
                     let sname = sanitize(&edge.name);
+                    let target_w = bit_width(&edge.elem_ty);
+                    let expr_ty = self.infer_expr_type(&value.node, ctx);
+                    let expr_w = bit_width(&expr_ty);
+                    let final_val = if expr_w != target_w && target_w > 1 && expr_w > 0 {
+                        width_cast(&val_sv, target_w)
+                    } else {
+                        val_sv
+                    };
                     match &edge.kind {
                         QueueEdgeKind::Cell { .. } => {
-                            self.line(&format!("c_{sname}_d = {val_sv};"));
+                            self.line(&format!("c_{sname}_d = {final_val};"));
                             self.line(&format!("c_{sname}_en = 1'b1;"));
                         }
                         QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue => {
-                            self.line(&format!("q_{sname}_enq_data = {val_sv};"));
+                            self.line(&format!("q_{sname}_enq_data = {final_val};"));
                             self.line(&format!("q_{sname}_enq_valid = 1'b1;"));
                         }
                     }
@@ -1510,6 +1554,28 @@ impl<'a> SvEmitter<'a> {
                 let l = self.emit_expr(&lhs.node, ctx);
                 let r = self.emit_expr(&rhs.node, ctx);
                 let op_sv = binop_sv(op);
+                // For shift/bitwise ops, widen narrower operand to match the wider one.
+                // This prevents Verilator WIDTHEXPAND warnings on mixed-width expressions.
+                if matches!(op, BinOp::Shl | BinOp::Or | BinOp::And | BinOp::Xor) {
+                    let lty = self.infer_expr_type(&lhs.node, ctx);
+                    let rty = self.infer_expr_type(&rhs.node, ctx);
+                    let lw = bit_width(&lty);
+                    let rw = bit_width(&rty);
+                    if lw > 0 && rw > 0 && lw != rw {
+                        let target = lw.max(rw);
+                        let lc = if lw < target {
+                            width_cast(&l, target)
+                        } else {
+                            l
+                        };
+                        let rc = if rw < target && !matches!(op, BinOp::Shl | BinOp::Shr) {
+                            width_cast(&r, target)
+                        } else {
+                            r
+                        };
+                        return format!("({lc} {op_sv} {rc})");
+                    }
+                }
                 format!("({l} {op_sv} {r})")
             }
             Expr::UnaryOp { op, expr } => {
@@ -1556,8 +1622,34 @@ impl<'a> SvEmitter<'a> {
                 }
             }
             Expr::Call { func, args } => {
-                let arg_strs: Vec<String> =
-                    args.iter().map(|a| self.emit_expr(&a.node, ctx)).collect();
+                // Look up external function signature for argument width casting
+                let param_types = self
+                    .net
+                    .network
+                    .external_fns
+                    .get(func)
+                    .map(|(params, _)| params.clone());
+                let arg_strs: Vec<String> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let sv = self.emit_expr(&a.node, ctx);
+                        if let Some(ref pts) = param_types
+                            && i < pts.len()
+                        {
+                            let param_w = bit_width(&pts[i]);
+                            let arg_ty = self.infer_expr_type(&a.node, ctx);
+                            let arg_w = bit_width(&arg_ty);
+                            if param_w > 0 && arg_w > 0 && param_w != arg_w {
+                                width_cast(&sv, param_w)
+                            } else {
+                                sv
+                            }
+                        } else {
+                            sv
+                        }
+                    })
+                    .collect();
                 format!("{func}({})", arg_strs.join(", "))
             }
             Expr::Update {
@@ -1849,7 +1941,20 @@ impl<'a> SvEmitter<'a> {
                 }
             }
             Expr::BitSlice { hi, lo, .. } => Ty::Bits(hi - lo + 1),
-            Expr::BinOp { lhs, .. } => self.infer_expr_type(&lhs.node, ctx),
+            Expr::BinOp { op, lhs, rhs } => {
+                let lt = self.infer_expr_type(&lhs.node, ctx);
+                let lw = bit_width(&lt);
+                let rw = bit_width(&self.infer_expr_type(&rhs.node, ctx));
+                // For bitwise/shift ops, result width is the max of operands
+                if matches!(op, BinOp::Or | BinOp::And | BinOp::Xor | BinOp::Shl)
+                    && rw > lw
+                    && rw > 0
+                {
+                    Ty::Bits(rw)
+                } else {
+                    lt
+                }
+            }
             Expr::UnaryOp { expr: e, .. } => self.infer_expr_type(&e.node, ctx),
             _ => Ty::Error,
         }

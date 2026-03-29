@@ -144,7 +144,7 @@ process Execute {
             Load => {
                 dmem_read_req.put(result)
                 let raw_word = dmem_read_resp.take()
-                let val = load_extend(d.funct3, raw_word, result & 3)
+                let val = load_extend(d.funct3, raw_word, result[1:0])
                 writeback.put((true, d.rd, val))
             }
             Store => {
@@ -152,7 +152,7 @@ process Execute {
                 -- For SW, store_merge returns data unchanged
                 dmem_read_req.put(result)
                 let old_word = dmem_read_resp.take()
-                let merged = store_merge(d.funct3, old_word, d.rs2_val, result & 3)
+                let merged = store_merge(d.funct3, old_word, d.rs2_val, result[1:0])
                 dmem_write_req.put((result, merged))
                 writeback.put((false, d.rd, result))
             }

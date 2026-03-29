@@ -2,14 +2,16 @@
 //
 // Wires the generated Marie module to behavioral mem_model instances for
 // instruction memory (imem, cpu domain) and data memory (dev_mem, dev domain).
-// Monitors dev_mem writes to tohost address (0x80001000) for riscv-tests.
+// UART TX pin is deserialized back into bytes and emitted via DPI uart_sim_tx.
+// UART RX pin is held idle (high). RTS is consumed and discarded.
 //
 // Three clock domains are driven independently by the C++ testbench:
-// cpu_clk, xbar_clk, dev_clk. The default clk/rst_n are unused but wired.
+// cpu_clk, xbar_clk, dev_clk.
 
 import rv32i_pkg::*;
 
 /* verilator lint_off UNOPTFLAT */
+/* verilator lint_off UNUSEDSIGNAL */
 
 module soc_top (
     input  wire         cpu_clk,
@@ -20,6 +22,11 @@ module soc_top (
     input  wire         dev_rst_n,
     output logic [31:0] tohost
 );
+
+    // -------------------------------------------------------------------------
+    // DPI function for TX output
+    // -------------------------------------------------------------------------
+    import "DPI-C" function void uart_sim_tx(input byte unsigned ch);
 
     // -------------------------------------------------------------------------
     // CPU instruction memory interconnect (cpu domain)
@@ -46,6 +53,19 @@ module soc_top (
     wire         dmem_wr_req_valid;
     wire         dmem_wr_req_ready;
     wire [63:0]  dmem_wr_req_data;
+
+    // -------------------------------------------------------------------------
+    // UART pin interconnect (dev domain)
+    // -------------------------------------------------------------------------
+    wire         uart_tx_enq_valid;
+    wire         uart_tx_enq_ready;
+    wire         uart_tx_enq_data;    // TX bit from Marie
+    wire         uart_rx_deq_valid;
+    wire         uart_rx_deq_ready;
+    wire         uart_rx_deq_data;    // RX bit to Marie
+    wire         uart_rts_enq_valid;
+    wire         uart_rts_enq_ready;
+    wire         uart_rts_enq_data;   // RTS output from Marie
 
     // -------------------------------------------------------------------------
     // Marie SoC instance
@@ -83,8 +103,91 @@ module soc_top (
         .q_dev_mem_read_resp_deq_data  (dmem_rd_resp_data),
         .q_dev_mem_write_req_enq_valid (dmem_wr_req_valid),
         .q_dev_mem_write_req_enq_ready (dmem_wr_req_ready),
-        .q_dev_mem_write_req_enq_data  (dmem_wr_req_data)
+        .q_dev_mem_write_req_enq_data  (dmem_wr_req_data),
+
+        // UART TX pin (Marie produces bits)
+        .q_UartPhy_tx_pin_enq_valid (uart_tx_enq_valid),
+        .q_UartPhy_tx_pin_enq_ready (uart_tx_enq_ready),
+        .q_UartPhy_tx_pin_enq_data  (uart_tx_enq_data),
+
+        // UART RX pin (Marie consumes bits)
+        .q_UartPhy_rx_pin_deq_valid (uart_rx_deq_valid),
+        .q_UartPhy_rx_pin_deq_ready (uart_rx_deq_ready),
+        .q_UartPhy_rx_pin_deq_data  (uart_rx_deq_data),
+
+        // UART RTS pin (Marie produces)
+        .q_UartPhy_rts_pin_enq_valid (uart_rts_enq_valid),
+        .q_UartPhy_rts_pin_enq_ready (uart_rts_enq_ready),
+        .q_UartPhy_rts_pin_enq_data  (uart_rts_enq_data)
     );
+
+    // -------------------------------------------------------------------------
+    // UART TX DPI bridge — deserialize bit stream back to bytes
+    // -------------------------------------------------------------------------
+    // The UartTx shift register outputs one bit per cycle on tx_pin.
+    // Each bit is held for BAUD_DIV+1 cycles. We sample at the baud rate
+    // midpoint and reconstruct bytes.
+    localparam BAUD_DIV = 33;  // 100 MHz / 3 MBaud
+
+    // Always accept TX bits from Marie
+    assign uart_tx_enq_ready = 1'b1;
+
+    // TX deserializer state machine:
+    // State 0: IDLE — wait for falling edge (start bit)
+    // State 1: wait 1.5 bit periods to reach mid-first-data-bit, then sample
+    // State 2-8: sample remaining data bits at baud intervals
+    // State 9: stop bit — emit byte via DPI
+    reg [7:0]  tx_shift;
+    reg [3:0]  tx_bcnt;    // 0=idle, 1..8=sampling data, 9=stop
+    reg [15:0] tx_baud;    // baud countdown
+    reg        tx_prev;    // previous TX bit (for edge detection)
+
+    always_ff @(posedge dev_clk or negedge dev_rst_n) begin
+        if (!dev_rst_n) begin
+            tx_shift <= 8'd0;
+            tx_bcnt  <= 4'd0;
+            tx_baud  <= 16'd0;
+            tx_prev  <= 1'b1;
+        end else begin
+            tx_prev <= uart_tx_enq_valid ? uart_tx_enq_data : tx_prev;
+            if (tx_bcnt == 0) begin
+                // IDLE: detect start bit falling edge
+                if (tx_prev && uart_tx_enq_valid && !uart_tx_enq_data) begin
+                    tx_bcnt <= 4'd1;
+                    // Skip start bit + half data bit: 1.5 bit periods
+                    tx_baud <= BAUD_DIV + (BAUD_DIV >> 1);
+                    tx_shift <= 8'd0;
+                end
+            end else begin
+                if (tx_baud == 0) begin
+                    if (tx_bcnt <= 8) begin
+                        // Sample data bit (LSB first)
+                        tx_shift <= {uart_tx_enq_data, tx_shift[7:1]};
+                        tx_bcnt <= tx_bcnt + 1;
+                        tx_baud <= BAUD_DIV;
+                    end
+                    if (tx_bcnt == 9) begin
+                        // Stop bit reached — emit byte
+                        uart_sim_tx(tx_shift);
+                        tx_bcnt <= 4'd0;
+                    end
+                end else begin
+                    tx_baud <= tx_baud - 1;
+                end
+            end
+        end
+    end
+
+    // -------------------------------------------------------------------------
+    // UART RX stub — idle line (always high, always valid)
+    // -------------------------------------------------------------------------
+    assign uart_rx_deq_valid = 1'b1;
+    assign uart_rx_deq_data  = 1'b1;  // idle high
+
+    // -------------------------------------------------------------------------
+    // UART RTS — always accept
+    // -------------------------------------------------------------------------
+    assign uart_rts_enq_ready = 1'b1;
 
     // -------------------------------------------------------------------------
     // Instruction memory — cpu domain clock
@@ -163,9 +266,6 @@ module soc_top (
             $readmemh(memfile, dmem.storage);
         end
     end
-
-    // -------------------------------------------------------------------------
-    // next_pc_q is pre-loaded with 0x80000000 by FIFO INIT_VALUE on reset
 
     // -------------------------------------------------------------------------
     // tohost monitor — watch dev_mem writes to 0x80001000

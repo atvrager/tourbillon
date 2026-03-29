@@ -165,6 +165,7 @@ fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
         ),
         depth: Some(1),
         init_tokens: None,
+        is_external: false,
     };
 
     let read_resp = QueueDecl {
@@ -178,6 +179,7 @@ fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
         ),
         depth: Some(1),
         init_tokens: None,
+        is_external: false,
     };
 
     let write_req = QueueDecl {
@@ -194,6 +196,7 @@ fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
         ),
         depth: Some(1),
         init_tokens: None,
+        is_external: false,
     };
 
     // Internal latency-modeling process:

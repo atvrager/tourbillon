@@ -328,6 +328,8 @@ pub struct QueueDecl {
     /// Number of initial tokens pre-loaded at reset.
     /// `init = N` in pipe declarations; enables deadlock-free cycles.
     pub init_tokens: Option<u64>,
+    /// `external Queue(...)` — no FIFO instantiated, signals become module ports.
+    pub is_external: bool,
 }
 
 /// Memory(K → V, depth = N, latency = M) declaration in a pipe.

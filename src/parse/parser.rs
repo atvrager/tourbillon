@@ -721,6 +721,7 @@ where
     let queue_decl = just(Token::Let)
         .ignore_then(ident_spanned)
         .then_ignore(just(Token::Assign))
+        .then(just(Token::External).or_not())
         .then_ignore(just(Token::Queue))
         .then_ignore(just(Token::LParen))
         .then(type_expr_parser())
@@ -739,11 +740,12 @@ where
                 .or_not(),
         )
         .then_ignore(just(Token::RParen))
-        .map(|(((name, ty), depth), init_tokens)| QueueDecl {
+        .map(|((((name, ext), ty), depth), init_tokens)| QueueDecl {
             name,
             ty,
             depth,
             init_tokens,
+            is_external: ext.is_some(),
         });
 
     // Memory(K → V, depth = N, latency = M)

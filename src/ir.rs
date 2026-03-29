@@ -62,6 +62,8 @@ pub enum QueueEdgeKind {
     Queue {
         /// Number of initial tokens pre-loaded at reset (from `init = N`).
         init_tokens: u64,
+        /// External queue — no FIFO instantiated, signals become module ports.
+        is_external: bool,
     },
     Cell {
         peeker_instances: Vec<String>,

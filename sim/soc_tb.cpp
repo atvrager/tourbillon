@@ -22,10 +22,11 @@
 #include <unistd.h>
 
 // ---------------------------------------------------------------------------
-// DPI: uart_tx — prints characters to stdout
+// DPI: uart_sim_tx — called from soc_top.sv when a full byte is deserialized
+// from the UART TX pin bit stream
 // ---------------------------------------------------------------------------
 
-extern "C" void uart_tx(unsigned char ch) {
+extern "C" void uart_sim_tx(unsigned char ch) {
     fputc(ch, stdout);
     fflush(stdout);
 }
@@ -117,7 +118,7 @@ static std::string elf_to_hex(const char *path) {
 int main(int argc, char **argv) {
     Verilated::commandArgs(argc, argv);
 
-    uint64_t max_cycles = 500000;  // Higher default — CDC adds latency
+    uint64_t max_cycles = 2000000;  // Higher default — CDC + UART bit serialization
     bool trace_en = false;
     const char *elf_file = nullptr;
 
@@ -185,7 +186,12 @@ int main(int argc, char **argv) {
     uint64_t cycle = 0;
     int result = -1;
 
-    while (cycle < max_cycles && result < 0) {
+    // UART drain: after tohost detected, continue for enough cycles to let
+    // the UART TX shift register finish serializing all queued bytes.
+    // 14 chars * 10 bits/char * 869 cycles/bit ≈ 122K cycles.
+    uint64_t drain_remaining = 0;
+
+    while (cycle < max_cycles && (result < 0 || drain_remaining > 0)) {
         // Rising edge — all domains
         dut->cpu_clk  = 1;
         dut->xbar_clk = 1;
@@ -194,15 +200,20 @@ int main(int argc, char **argv) {
         if (tfp) tfp->dump(t++);
 
         // Check tohost
-        uint32_t th = dut->tohost;
-        if (th != 0) {
-            if (th == 1) {
-                result = 0;
-            } else {
-                result = 1;
-                fprintf(stderr, "[soc_tb] FAIL: tohost = 0x%08x (test %u) at cycle %lu\n",
-                        th, th >> 1, cycle);
+        if (result < 0) {
+            uint32_t th = dut->tohost;
+            if (th != 0) {
+                if (th == 1) {
+                    result = 0;
+                    drain_remaining = 10000;  // drain UART TX buffer (3 MBaud)
+                } else {
+                    result = 1;
+                    fprintf(stderr, "[soc_tb] FAIL: tohost = 0x%08x (test %u) at cycle %lu\n",
+                            th, th >> 1, cycle);
+                }
             }
+        } else if (drain_remaining > 0) {
+            drain_remaining--;
         }
 
         // Falling edge — all domains

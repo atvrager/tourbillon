@@ -79,7 +79,7 @@ pub fn analyze(scheduled: &ScheduledNetwork) -> Vec<Diagnostic> {
                     // Cell with init = occupied at reset, counts as 1 token
                     total_tokens += 1;
                 }
-                QueueEdgeKind::Queue { init_tokens } => {
+                QueueEdgeKind::Queue { init_tokens, .. } => {
                     total_tokens += init_tokens;
                 }
                 _ => {}

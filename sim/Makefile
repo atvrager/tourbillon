@@ -7,7 +7,7 @@ OBJ_DIR   := obj_dir
 SIM_BIN   := $(OBJ_DIR)/sim_cpu
 
 # RISC-V toolchain
-RISCV_PREFIX ?= riscv64-unknown-elf-
+RISCV_PREFIX ?= riscv64-elf-
 AS            = $(RISCV_PREFIX)as
 LD            = $(RISCV_PREFIX)ld
 OBJCOPY       = $(RISCV_PREFIX)objcopy
@@ -23,7 +23,7 @@ SOC_OBJ_DIR := soc_obj_dir
 SOC_BIN     := $(SOC_OBJ_DIR)/sim_soc
 
 .PHONY: sv verilate build run test-smoke test-hex riscv-tests clean
-.PHONY: soc-sv soc-build soc-hello soc-riscv-tests
+.PHONY: soc-sv soc-build soc-hello soc-riscv-tests rtl-check
 
 # Generate SystemVerilog from Tourbillon source
 sv:
@@ -135,6 +135,19 @@ soc-riscv-tests: soc-build
 	echo ""; \
 	echo "SoC Results: $$pass passed, $$fail failed, $$skip skipped"; \
 	test $$fail -eq 0
+
+# =========================================================================
+# FPGA RTL targets
+# =========================================================================
+
+RTL_DIR := ../rtl
+
+# Lint-check the FPGA toplevel (no simulation, just compile check)
+rtl-check: soc-sv
+	$(VERILATOR) --lint-only -Wall -Wno-fatal \
+		-I$(SOC_SV_DIR) \
+		$(RTL_DIR)/marie_top.sv rv32i_pkg.sv \
+		$(SOC_SV_DIR)/*.sv
 
 # Remove build artifacts
 clean:
