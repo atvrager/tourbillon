@@ -5,6 +5,7 @@ pub mod elaborate;
 pub mod ir;
 pub mod lower;
 pub mod parse;
+pub mod provenance;
 pub mod schedule;
 pub mod types;
 
@@ -63,7 +64,15 @@ pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
 }
 
 /// Run the full pipeline through lowering, returning generated SV files.
-pub fn build(src: &str, filename: &str) -> Result<Vec<lower::SvFile>, Errors> {
+///
+/// When `provenance` is `Some`, a BLAKE3 hash comment and `localparam` are
+/// embedded in each generated module. Pass `None` to omit provenance (e.g.
+/// for golden-file tests that must remain stable).
+pub fn build(
+    src: &str,
+    filename: &str,
+    provenance: Option<[u8; 32]>,
+) -> Result<Vec<lower::SvFile>, Errors> {
     let (cst, parse_errors) = parse::parse(src);
 
     if !parse_errors.is_empty() {
@@ -113,5 +122,5 @@ pub fn build(src: &str, filename: &str) -> Result<Vec<lower::SvFile>, Errors> {
         scheduled.push(sched);
     }
 
-    Ok(lower::lower(&scheduled))
+    Ok(lower::lower(&scheduled, provenance))
 }

@@ -17,7 +17,7 @@ fn check_golden(example_name: &str) {
     let src = std::fs::read_to_string(&tbn_path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", tbn_path.display()));
 
-    let files = tbn::build(&src, tbn_path.to_str().unwrap()).unwrap_or_else(|_| {
+    let files = tbn::build(&src, tbn_path.to_str().unwrap(), None).unwrap_or_else(|_| {
         panic!("{example_name}.tbn failed to compile");
     });
 
@@ -101,7 +101,7 @@ pipe Top {
     Counter {}
 }
 "#;
-    let files = tbn::build(src, "test.tbn").unwrap();
+    let files = tbn::build(src, "test.tbn", None).unwrap();
     assert!(!files.is_empty());
 
     let sv = &files[0].content;
@@ -139,7 +139,7 @@ pipe Top {
     Consumer { input = q }
 }
 "#;
-    let files = tbn::build(src, "test.tbn").unwrap();
+    let files = tbn::build(src, "test.tbn", None).unwrap();
     // Should have tbn_fifo.sv and Top.sv
     assert!(
         files.len() >= 2,
@@ -177,7 +177,7 @@ pipe Top {
     Counter {}
 }
 "#;
-    let files = tbn::build(src, "test.tbn").unwrap();
+    let files = tbn::build(src, "test.tbn", None).unwrap();
     let sv = &files[0].content;
 
     // Should have priority suppression: dec suppressed by inc
@@ -235,6 +235,15 @@ pipe Top {
     assert!(sv_file.exists(), "Top.sv should exist");
     let content = std::fs::read_to_string(&sv_file).unwrap();
     assert!(content.contains("module Top"));
+    // CLI build always embeds provenance
+    assert!(
+        content.contains("TBN_PROVENANCE"),
+        "CLI build should embed provenance localparam"
+    );
+    assert!(
+        content.contains("// Tourbillon provenance:"),
+        "CLI build should embed provenance comment"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

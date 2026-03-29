@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0 complete. Phase 1 complete through Stage 6 (lowering): parse → desugar → type-check → elaborate → schedule → lower. `tbn build` produces synthesisable SystemVerilog. Provenance (Stage 7) not yet implemented. `TOURBILLON.md` is the authoritative specification.
+**Status:** Phase 0 complete. Phase 1 complete: parse → desugar → type-check → elaborate → schedule → lower → provenance. `tbn build` produces provenance-tagged SystemVerilog with BLAKE3 source hashing. `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -29,6 +29,8 @@ CLI usage:
 ```
 tbn check <file.tbn>           # Type-check and deadlock analysis (no codegen)
 tbn build <file.tbn> -o <dir>  # Compile to SystemVerilog (.sv files)
+tbn status <file.tbn>          # Show provenance hash and cache status
+tbn clean                      # Remove build cache (~/.tbn/store/)
 ```
 
 ## Git Hooks
@@ -94,6 +96,7 @@ src/
   elaborate.rs       -- Elaboration pass: AST pipes → petgraph process networks
   schedule.rs        -- Rule priority assignment, conflict detection
   lower.rs           -- SV emitter: process network → SystemVerilog
+  provenance.rs      -- BLAKE3 hashing, source manifest, cache helpers
   parse/
     mod.rs           -- Orchestrates lexer → parser, converts errors
     token.rs         -- Token enum (keywords, operators, punctuation)
@@ -114,6 +117,7 @@ tests/
   elaborate.rs       -- Elaboration integration tests
   schedule.rs        -- Schedule integration tests
   lower.rs           -- Lowering / SV codegen integration tests
+  provenance.rs      -- Provenance hashing and embedding tests
 ```
 
 ### Provenance System

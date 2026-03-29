@@ -237,7 +237,7 @@ fn collect_takes_in_expr(expr: &Expr, takes: &mut BTreeSet<String>) {
 // ---------------------------------------------------------------------------
 
 /// Lower scheduled networks to SystemVerilog files.
-pub fn lower(scheduled: &[ScheduledNetwork]) -> Vec<SvFile> {
+pub fn lower(scheduled: &[ScheduledNetwork], provenance: Option<[u8; 32]>) -> Vec<SvFile> {
     let mut files = vec![];
 
     let has_queues = scheduled.iter().any(|sn| {
@@ -255,7 +255,7 @@ pub fn lower(scheduled: &[ScheduledNetwork]) -> Vec<SvFile> {
     }
 
     for sn in scheduled {
-        let mut emitter = SvEmitter::new(sn);
+        let mut emitter = SvEmitter::new(sn, provenance);
         let content = emitter.emit();
         files.push(SvFile {
             name: format!("{}.sv", sn.network.name),
@@ -274,6 +274,7 @@ struct SvEmitter<'a> {
     net: &'a ScheduledNetwork,
     out: String,
     indent: usize,
+    provenance: Option<[u8; 32]>,
 }
 
 /// Per-rule context for expression inlining.
@@ -287,11 +288,12 @@ struct RuleCtx<'a> {
 }
 
 impl<'a> SvEmitter<'a> {
-    fn new(net: &'a ScheduledNetwork) -> Self {
+    fn new(net: &'a ScheduledNetwork, provenance: Option<[u8; 32]>) -> Self {
         Self {
             net,
             out: String::new(),
             indent: 0,
+            provenance,
         }
     }
 
@@ -328,9 +330,18 @@ impl<'a> SvEmitter<'a> {
         self.line("input  wire rst_n");
         self.dedent();
         self.line(");");
-        self.blank();
 
         self.indent();
+        if let Some(hash) = self.provenance {
+            let hex = crate::provenance::hex(&hash);
+            self.blank();
+            self.line(&format!("// Tourbillon provenance: {hex}"));
+            self.line(&format!(
+                "localparam logic [255:0] TBN_PROVENANCE = 256'h{hex};"
+            ));
+        }
+        self.blank();
+
         self.emit_queue_instances();
         self.emit_cell_declarations();
         self.emit_rule_enables();
@@ -973,7 +984,7 @@ pipe Top {
     Counter {}
 }
 "#;
-        let files = crate::build(src, "test.tbn").unwrap();
+        let files = crate::build(src, "test.tbn", None).unwrap();
         assert_eq!(files.len(), 1); // No queues → no tbn_fifo.sv
         let sv = &files[0].content;
 

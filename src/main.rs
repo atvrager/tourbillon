@@ -25,6 +25,14 @@ enum Command {
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
     },
+    /// Show provenance hash and cache status
+    Status {
+        /// Input .tbn file(s)
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// Remove the build cache (~/.tbn/store/)
+    Clean,
 }
 
 fn main() {
@@ -46,26 +54,96 @@ fn main() {
             }
         }
         Command::Build { files, output } => {
-            for path in &files {
-                match std::fs::read_to_string(path) {
-                    Ok(src) => match tbn::build(&src, path.to_string_lossy().as_ref()) {
-                        Ok(sv_files) => {
-                            for sv_file in &sv_files {
-                                let out_path = output.join(&sv_file.name);
-                                if let Err(e) = std::fs::write(&out_path, &sv_file.content) {
-                                    eprintln!("error writing {}: {e}", out_path.display());
-                                    std::process::exit(1);
-                                }
-                                eprintln!("{}: wrote {}", path.display(), out_path.display());
-                            }
-                        }
-                        Err(_) => std::process::exit(1),
-                    },
-                    Err(e) => {
+            // Read all input files upfront
+            let sources: Vec<(String, String)> = files
+                .iter()
+                .map(|path| {
+                    let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
                         eprintln!("error: {}: {e}", path.display());
+                        std::process::exit(1);
+                    });
+                    (path.to_string_lossy().to_string(), src)
+                })
+                .collect();
+
+            // Compute source root hash
+            let file_refs: Vec<(&str, &[u8])> = sources
+                .iter()
+                .map(|(name, content)| (name.as_str(), content.as_bytes()))
+                .collect();
+            let root_hash = tbn::provenance::source_root(&file_refs);
+
+            // Write manifest and SV files to cache dir (best-effort)
+            let cache = tbn::provenance::cache_dir(&root_hash);
+            std::fs::create_dir_all(&cache).ok();
+            let manifest = tbn::provenance::source_manifest(&file_refs);
+            std::fs::write(
+                cache.join("source_manifest.json"),
+                serde_json::to_string_pretty(&manifest).unwrap(),
+            )
+            .ok();
+
+            // Compile each file
+            for (name, src) in &sources {
+                match tbn::build(src, name, Some(root_hash)) {
+                    Ok(sv_files) => {
+                        for sv_file in &sv_files {
+                            let out_path = output.join(&sv_file.name);
+                            if let Err(e) = std::fs::write(&out_path, &sv_file.content) {
+                                eprintln!("error writing {}: {e}", out_path.display());
+                                std::process::exit(1);
+                            }
+                            eprintln!("{name}: wrote {}", out_path.display());
+                            // Also cache the SV file (best-effort)
+                            std::fs::write(cache.join(&sv_file.name), &sv_file.content).ok();
+                        }
+                    }
+                    Err(_) => std::process::exit(1),
+                }
+            }
+
+            eprintln!("provenance: {}", tbn::provenance::hex(&root_hash));
+        }
+        Command::Status { files } => {
+            let sources: Vec<(String, String)> = files
+                .iter()
+                .map(|path| {
+                    let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                        eprintln!("error: {}: {e}", path.display());
+                        std::process::exit(1);
+                    });
+                    (path.to_string_lossy().to_string(), src)
+                })
+                .collect();
+
+            let file_refs: Vec<(&str, &[u8])> = sources
+                .iter()
+                .map(|(name, content)| (name.as_str(), content.as_bytes()))
+                .collect();
+            let root_hash = tbn::provenance::source_root(&file_refs);
+            let hex = tbn::provenance::hex(&root_hash);
+            let cache = tbn::provenance::cache_dir(&root_hash);
+
+            println!("source_root: {hex}");
+            if cache.exists() {
+                println!("cache: {} (exists)", cache.display());
+            } else {
+                println!("cache: {} (not found)", cache.display());
+            }
+        }
+        Command::Clean => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            let store = PathBuf::from(home).join(".tbn").join("store");
+            if store.exists() {
+                match std::fs::remove_dir_all(&store) {
+                    Ok(()) => eprintln!("removed {}", store.display()),
+                    Err(e) => {
+                        eprintln!("error removing {}: {e}", store.display());
                         std::process::exit(1);
                     }
                 }
+            } else {
+                eprintln!("nothing to clean");
             }
         }
     }

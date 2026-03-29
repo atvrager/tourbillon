@@ -580,7 +580,7 @@ tbn init <name>                 Scaffold a new Tourbillon project
 | Phase | Deliverable | Scope | Status |
 |---|---|---|---|
 | **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output | **Complete** — lexer, parser, desugaring, type checker, linearity checker |
-| **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | **In progress** — Stages 1–6 complete (`tbn build` produces SV); Stage 7 (provenance) not yet implemented |
+| **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | **Complete** — All 7 stages implemented; `tbn build` produces provenance-tagged SV |
 | **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | Planned |
 | **3 — Verify** | `tbn status` / `tbn verify` over UART/JTAG | Provenance chain to running FPGA | Planned |
 | **4 — Formal** | mCRL2 export + deadlock checker | Verification story | Planned |
