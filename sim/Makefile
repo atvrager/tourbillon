@@ -23,7 +23,7 @@ SOC_OBJ_DIR := soc_obj_dir
 SOC_BIN     := $(SOC_OBJ_DIR)/sim_soc
 
 .PHONY: sv verilate build run test-smoke test-hex riscv-tests clean
-.PHONY: soc-sv soc-build soc-hello soc-riscv-tests rtl-check
+.PHONY: soc-sv soc-build soc-hello soc-riscv-tests rtl-check rtl-export
 
 # Generate SystemVerilog from Tourbillon source
 sv:
@@ -151,8 +151,40 @@ rtl-check: soc-sv
 		$(RTL_DIR)/marie_top.sv $(RTL_DIR)/xilinx_stubs.sv rv32i_pkg.sv \
 		$(SOC_SV_DIR)/*.sv
 
+# =========================================================================
+# RTL export — zip package for Vivado
+# =========================================================================
+# Produces marie_soc_rtl.zip with topo-sorted file list ready for
+# read_verilog / add_files in Vivado.  Drop in, add your XDC, and build.
+
+RTL_EXPORT_DIR := rtl_export
+RTL_ZIP        := marie_soc_rtl.zip
+
+rtl-export: soc-sv
+	@rm -rf $(RTL_EXPORT_DIR) $(RTL_ZIP)
+	@mkdir -p $(RTL_EXPORT_DIR)
+	@# Copy sources in topo order (packages → leaves → middle → top)
+	@cp rv32i_pkg.sv                   $(RTL_EXPORT_DIR)/1_rv32i_pkg.sv
+	@cp $(SOC_SV_DIR)/tbn_fifo.sv      $(RTL_EXPORT_DIR)/2_tbn_fifo.sv
+	@cp $(SOC_SV_DIR)/tbn_async_fifo.sv $(RTL_EXPORT_DIR)/3_tbn_async_fifo.sv
+	@cp $(SOC_SV_DIR)/Marie.sv         $(RTL_EXPORT_DIR)/4_Marie.sv
+	@cp $(RTL_DIR)/marie_top.sv        $(RTL_EXPORT_DIR)/5_marie_top.sv
+	@# Generate filelist.f (relative paths, topo-sorted)
+	@printf '// Marie Antoinette SoC — Vivado source file list (topo-sorted)\n' \
+		> $(RTL_EXPORT_DIR)/filelist.f
+	@printf '// Add files in this order, or use: read_verilog -sv [glob *.sv]\n' \
+		>> $(RTL_EXPORT_DIR)/filelist.f
+	@printf '// Xilinx primitives (IBUFDS, MMCME4_ADV, BUFGCE) come from unisim.\n' \
+		>> $(RTL_EXPORT_DIR)/filelist.f
+	@for f in 1_rv32i_pkg.sv 2_tbn_fifo.sv 3_tbn_async_fifo.sv 4_Marie.sv 5_marie_top.sv; do \
+		echo "$$f" >> $(RTL_EXPORT_DIR)/filelist.f; \
+	done
+	@cd $(RTL_EXPORT_DIR) && zip -q ../$(RTL_ZIP) filelist.f *.sv
+	@echo "Exported: $(RTL_ZIP)"
+	@unzip -l $(RTL_ZIP) | grep '\.sv\|filelist'
+
 # Remove build artifacts
 clean:
-	rm -rf $(OBJ_DIR) $(SV_DIR) $(SOC_OBJ_DIR) $(SOC_SV_DIR)
+	rm -rf $(OBJ_DIR) $(SV_DIR) $(SOC_OBJ_DIR) $(SOC_SV_DIR) $(RTL_EXPORT_DIR) $(RTL_ZIP)
 	rm -f tests/*.bin tests/*.o tests/*.elf
 	rm -f sim_trace.vcd sim_trace.fst soc_trace.fst
