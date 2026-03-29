@@ -17,12 +17,12 @@ pub fn elaborate(
     type_env: &TypeEnv,
 ) -> (Vec<ProcessNetwork>, Vec<Diagnostic>) {
     let mut diagnostics = vec![];
-    let processes = index_processes(source);
+    let (processes, pipes) = index_definitions(source);
 
     let mut networks = vec![];
     for item in &source.items {
         if let Item::Pipe(pipe) = &item.node
-            && let Some(net) = elaborate_pipe(pipe, &processes, type_env, &mut diagnostics)
+            && let Some(net) = elaborate_pipe(pipe, &processes, &pipes, type_env, &mut diagnostics)
         {
             networks.push(net);
         }
@@ -35,15 +35,22 @@ pub fn elaborate(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build a name → Process map from all process definitions.
-fn index_processes(source: &SourceFile) -> HashMap<String, &Process> {
-    let mut map = HashMap::new();
+/// Build name → Process and name → Pipe maps from all definitions.
+fn index_definitions(source: &SourceFile) -> (HashMap<String, &Process>, HashMap<String, &Pipe>) {
+    let mut processes = HashMap::new();
+    let mut pipes = HashMap::new();
     for item in &source.items {
-        if let Item::Process(p) = &item.node {
-            map.insert(p.name.node.clone(), p);
+        match &item.node {
+            Item::Process(p) => {
+                processes.insert(p.name.node.clone(), p);
+            }
+            Item::Pipe(p) => {
+                pipes.insert(p.name.node.clone(), p);
+            }
+            _ => {}
         }
     }
-    map
+    (processes, pipes)
 }
 
 /// Split a dotted target like "Writeback.regfile" into ("Writeback", "regfile").
@@ -118,20 +125,134 @@ struct PendingEdge {
 fn elaborate_pipe(
     pipe: &Pipe,
     processes: &HashMap<String, &Process>,
+    pipes: &HashMap<String, &Pipe>,
     type_env: &TypeEnv,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ProcessNetwork> {
     let mut graph = petgraph::graph::DiGraph::new();
     let mut instances: HashMap<String, NodeIndex> = HashMap::new();
     let mut had_error = false;
+    // Track pipe instance port mappings: inst_name → (port_name → queue_name_in_child)
+    // Used to wire parent bindings through to child pipe's dangling endpoints.
+    let mut pipe_instance_ports: HashMap<String, HashMap<String, String>> = HashMap::new();
+    // Domain mappings from pipe instances (applied during domain collection phase)
+    let mut pipe_instance_domains: HashMap<String, Option<String>> = HashMap::new();
 
     // Phase 1 + 2: Create nodes from instances
     for (idx, inst) in pipe.instances.iter().enumerate() {
         let proc_name = &inst.process_name.node;
+
+        // Check if it's a pipe instance
+        if let Some(child_pipe) = pipes.get(proc_name) {
+            // Skip self-reference
+            if proc_name == &pipe.name.node {
+                diagnostics.push(Diagnostic::error(
+                    inst.process_name.span.clone(),
+                    format!("pipe `{proc_name}` cannot instantiate itself"),
+                ));
+                had_error = true;
+                continue;
+            }
+
+            // Recursively elaborate the child pipe
+            let child_net = elaborate_pipe(child_pipe, processes, pipes, type_env, diagnostics);
+            let Some(child_net) = child_net else {
+                had_error = true;
+                continue;
+            };
+
+            // Generate instance prefix for namespacing
+            let inst_prefix = {
+                let base = proc_name.clone();
+                if instances.contains_key(&base) {
+                    format!("{base}_{idx}")
+                } else {
+                    base
+                }
+            };
+
+            // Merge child graph nodes into parent, remapping indices
+            let mut child_node_map: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+            for child_node_idx in child_net.graph.node_indices() {
+                let child_node = &child_net.graph[child_node_idx];
+                let node = ProcessNode {
+                    instance_name: format!("{}_{}", inst_prefix, child_node.instance_name),
+                    process_name: child_node.process_name.clone(),
+                    rules: child_node.rules.clone(),
+                    ports: child_node
+                        .ports
+                        .iter()
+                        .map(|p| ResolvedPort {
+                            name: p.name.clone(),
+                            kind: p.kind,
+                            ty: p.ty.clone(),
+                            bound_to: None, // Re-wire after edge creation
+                        })
+                        .collect(),
+                    span: child_node.span.clone(),
+                    is_memory_stub: child_node.is_memory_stub,
+                };
+                let new_idx = graph.add_node(node);
+                child_node_map.insert(child_node_idx, new_idx);
+                instances.insert(
+                    format!("{}_{}", inst_prefix, child_node.instance_name),
+                    new_idx,
+                );
+            }
+
+            // Merge child graph edges, remapping node indices
+            let mut child_edge_map: HashMap<EdgeIndex, EdgeIndex> = HashMap::new();
+            for child_edge_idx in child_net.graph.edge_indices() {
+                let child_edge = &child_net.graph[child_edge_idx];
+                let (src, dst) = child_net.graph.edge_endpoints(child_edge_idx).unwrap();
+                let new_src = child_node_map[&src];
+                let new_dst = child_node_map[&dst];
+                let mut edge = child_edge.clone();
+                edge.name = format!("{}_{}", inst_prefix, edge.name);
+                let new_edge_idx = graph.add_edge(new_src, new_dst, edge);
+                child_edge_map.insert(child_edge_idx, new_edge_idx);
+            }
+
+            // Re-wire port bindings on merged nodes
+            for child_node_idx in child_net.graph.node_indices() {
+                let child_node = &child_net.graph[child_node_idx];
+                let new_node_idx = child_node_map[&child_node_idx];
+                for (port_idx, port) in child_node.ports.iter().enumerate() {
+                    if let Some(old_edge) = port.bound_to
+                        && let Some(&new_edge) = child_edge_map.get(&old_edge)
+                    {
+                        graph[new_node_idx].ports[port_idx].bound_to = Some(new_edge);
+                    }
+                }
+            }
+
+            // Store domain mappings from child instances.
+            for (child_inst, child_domain) in &child_net.domain_map {
+                let parent_inst_name = format!("{}_{}", inst_prefix, child_inst);
+                if let Some(ref domain_ann) = inst.domain {
+                    pipe_instance_domains.insert(parent_inst_name, Some(domain_ann.node.clone()));
+                } else {
+                    pipe_instance_domains.insert(parent_inst_name, child_domain.clone());
+                }
+            }
+
+            // Pipe port mapping: the parent's bindings reference queue names
+            // in the child pipe. Map binding port names to the prefixed edge
+            // names in the merged parent graph.
+            let mut port_map: HashMap<String, String> = HashMap::new();
+            for binding in &inst.bindings {
+                let child_queue_name = format!("{}_{}", inst_prefix, binding.port.node);
+                port_map.insert(binding.port.node.clone(), child_queue_name);
+            }
+            pipe_instance_ports.insert(inst_prefix, port_map);
+
+            continue;
+        }
+
         let Some(proc_def) = processes.get(proc_name) else {
             diagnostics.push(Diagnostic::error(
                 inst.process_name.span.clone(),
-                format!("unknown process `{proc_name}`"),
+                format!("unknown process or pipe `{proc_name}`"),
             ));
             had_error = true;
             continue;
@@ -211,6 +332,11 @@ fn elaborate_pipe(
         } else {
             domain_map.insert(instance_name, None);
         }
+    }
+
+    // Merge domain mappings from pipe instances
+    for (inst_name, domain) in pipe_instance_domains {
+        domain_map.insert(inst_name, domain);
     }
 
     let domains: Vec<String> = pipe
