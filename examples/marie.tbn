@@ -263,8 +263,8 @@ pipe CPUCore {
     let wb_q     = Queue(Bool × RegIdx × Word, depth = 1)
 
     -- Next-PC queue: Execute → Fetch (non-speculative, no redirect needed)
-    -- Pre-loaded with reset PC (0x80000000) by the testbench after reset.
-    let next_pc_q = Queue(Addr, depth = 1)
+    -- Pre-loaded with reset PC via FIFO INIT_VALUE on reset.
+    let next_pc_q = Queue(Addr, depth = 1, init = 0x8000_0000)
 
     -- Instruction memory (local, fast path)
     let imem = Memory(Addr → Word, depth = 4096, latency = 1)

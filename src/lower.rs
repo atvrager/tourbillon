@@ -960,13 +960,13 @@ impl<'a> SvEmitter<'a> {
             let (fifo_src, _fifo_dst) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
             let fifo_clk = self.clock_for_instance(&self.net.network.graph[fifo_src].instance_name);
             let fifo_rst = self.reset_for_instance(&self.net.network.graph[fifo_src].instance_name);
-            let init_count = match &edge.kind {
-                QueueEdgeKind::Queue { init_tokens } => *init_tokens,
-                _ => 0,
+            let init_value = match &edge.kind {
+                QueueEdgeKind::Queue { init_tokens } if *init_tokens > 0 => Some(*init_tokens),
+                _ => None,
             };
-            if init_count > 0 {
+            if let Some(val) = init_value {
                 self.line(&format!(
-                    "tbn_fifo #(.WIDTH({w}), .DEPTH({}), .INIT_COUNT({init_count}), .INIT_VALUE(1)) q_{sname}_inst (",
+                    "tbn_fifo #(.WIDTH({w}), .DEPTH({}), .INIT_COUNT(1), .INIT_VALUE({w}'d{val})) q_{sname}_inst (",
                     edge.depth
                 ));
             } else {

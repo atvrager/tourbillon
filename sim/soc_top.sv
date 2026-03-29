@@ -165,9 +165,7 @@ module soc_top (
     end
 
     // -------------------------------------------------------------------------
-    // next_pc_q is pre-loaded with reset vector (0x80000000) by the C++ testbench
-    // via Verilator public access. This is the one remaining rootp poke —
-    // FIFO INIT_VALUE support for arbitrary values is a future language feature.
+    // next_pc_q is pre-loaded with 0x80000000 by FIFO INIT_VALUE on reset
 
     // -------------------------------------------------------------------------
     // tohost monitor — watch dev_mem writes to 0x80001000

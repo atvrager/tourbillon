@@ -100,7 +100,6 @@ soc-sv:
 soc-build: soc-sv
 	$(VERILATOR) --cc --exe --build --trace-fst -Wall -Wno-fatal \
 		--top-module soc_top \
-		--public-flat-rw \
 		-j $(NPROC) \
 		-I$(SOC_SV_DIR) \
 		soc_top.sv rv32i_pkg.sv mem_model.sv \

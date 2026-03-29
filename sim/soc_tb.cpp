@@ -11,7 +11,6 @@
 #include <verilated.h>
 #include <verilated_fst_c.h>
 #include "Vsoc_top.h"
-#include "Vsoc_top___024root.h"  // needed for next_pc_q preload only
 
 #include <cstdio>
 #include <cstdlib>
@@ -177,13 +176,7 @@ int main(int argc, char **argv) {
     }
     dut->cpu_rst_n = 1; dut->xbar_rst_n = 1; dut->dev_rst_n = 1;
 
-    // Pre-load next_pc_q with reset vector (the one remaining rootp poke)
-    {
-        auto &r = *dut->rootp;
-        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_next_pc_q_inst__DOT__storage[0] = 0x80000000;
-        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_next_pc_q_inst__DOT__wr_ptr = 1;
-        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_next_pc_q_inst__DOT__count = 1;
-    }
+    // next_pc_q is pre-loaded with 0x80000000 by FIFO INIT_VALUE on reset
 
     // --- Simulation ---
     // All three clock domains run in lock-step (same frequency).
