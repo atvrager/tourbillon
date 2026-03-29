@@ -874,6 +874,56 @@ fn elaborate_pipe_inner(
         }
     }
 
+    // Prune dead edges from cross-pipe substitution.
+    // Only remove edges that were explicitly replaced — they have no port references.
+    // Use retain_edges which handles index stability correctly.
+    {
+        let referenced: HashSet<EdgeIndex> = graph
+            .node_indices()
+            .flat_map(|ni| graph[ni].ports.iter().filter_map(|p| p.bound_to))
+            .collect();
+        // Collect names of dead child edges from cross-pipe substitutions
+        let dead_names: HashSet<String> = cross_pipe_subs
+            .iter()
+            .map(|(child_name, _)| child_name.clone())
+            .collect();
+        // Find dead edge indices (substituted child edges with no port references)
+        let dead_edges: HashSet<EdgeIndex> = graph
+            .edge_indices()
+            .filter(|ei| {
+                let name = &graph[*ei].name;
+                dead_names.contains(name) && !referenced.contains(ei)
+            })
+            .collect();
+        if !dead_edges.is_empty() {
+            // Remove and fix up bound_to references using petgraph's swap semantics
+            let mut removed: Vec<EdgeIndex> = dead_edges.into_iter().collect();
+            removed.sort_by_key(|ei| std::cmp::Reverse(ei.index()));
+            for ei in removed {
+                let last = EdgeIndex::new(graph.edge_count() - 1);
+                graph.remove_edge(ei);
+                // If ei != last, petgraph swapped last into ei's slot
+                if ei.index() < last.index() {
+                    for ni in graph.node_indices() {
+                        for port in &mut graph[ni].ports {
+                            if port.bound_to == Some(last) {
+                                port.bound_to = Some(ei);
+                            }
+                        }
+                    }
+                    // Also fix queue_edge_map
+                    let swapped_name: Option<String> = queue_edge_map
+                        .iter()
+                        .find(|&(_, v)| *v == last)
+                        .map(|(k, _)| k.clone());
+                    if let Some(name) = swapped_name {
+                        queue_edge_map.insert(name, ei);
+                    }
+                }
+            }
+        }
+    }
+
     // Bind deferred port bindings for queue edges.
     for (idx, inst) in pipe.instances.iter().enumerate() {
         let proc_name = &inst.process_name.node;

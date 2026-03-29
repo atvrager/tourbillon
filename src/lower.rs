@@ -596,9 +596,15 @@ impl<'a> SvEmitter<'a> {
         let domains = &self.net.network.domains;
         let has_domains = !domains.is_empty();
 
-        // Determine if any process uses the default domain (no annotation)
-        let has_default_domain =
-            !has_domains || self.net.network.domain_map.values().any(|d| d.is_none());
+        // Determine if any non-stub process uses the default domain (no annotation)
+        let has_default_domain = !has_domains
+            || self.net.network.domain_map.iter().any(|(inst, d)| {
+                d.is_none()
+                    && !self
+                        .memory_stub_nodes
+                        .iter()
+                        .any(|&ni| self.net.network.graph[ni].instance_name == *inst)
+            });
 
         self.line(&format!("module {pipe_name} ("));
         self.indent();

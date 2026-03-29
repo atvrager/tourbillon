@@ -51,10 +51,6 @@ module soc_top (
     // Marie SoC instance
     // -------------------------------------------------------------------------
     Marie marie_inst (
-        // Default domain (unused — all processes have explicit domains)
-        .clk       (cpu_clk),
-        .rst_n     (cpu_rst_n),
-
         // CPU domain
         .cpu_clk   (cpu_clk),
         .cpu_rst_n (cpu_rst_n),
