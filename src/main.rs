@@ -59,26 +59,45 @@ enum Command {
     },
 }
 
+/// Read and concatenate multiple .tbn source files into a single compilation unit.
+/// Returns (combined_source, display_name).
+fn read_and_concat(files: &[PathBuf]) -> (String, String) {
+    let mut combined = String::new();
+    for path in files {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("error: {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&src);
+    }
+    let display_name = if files.len() == 1 {
+        files[0].to_string_lossy().to_string()
+    } else {
+        files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("+")
+    };
+    (combined, display_name)
+}
+
 fn main() {
     let cli = Cli::parse();
 
     match cli.command {
         Command::Check { files } => {
-            for path in &files {
-                match std::fs::read_to_string(path) {
-                    Ok(src) => match tbn::check(&src, path.to_string_lossy().as_ref()) {
-                        Ok(()) => eprintln!("{}: ok", path.display()),
-                        Err(_) => std::process::exit(1),
-                    },
-                    Err(e) => {
-                        eprintln!("error: {}: {e}", path.display());
-                        std::process::exit(1);
-                    }
-                }
+            let (combined_src, display_name) = read_and_concat(&files);
+            match tbn::check(&combined_src, &display_name) {
+                Ok(()) => eprintln!("{display_name}: ok"),
+                Err(_) => std::process::exit(1),
             }
         }
         Command::Build { files, output } => {
-            // Read all input files upfront
+            // Read all input files and compute provenance from individual files
             let sources: Vec<(String, String)> = files
                 .iter()
                 .map(|path| {
@@ -90,14 +109,13 @@ fn main() {
                 })
                 .collect();
 
-            // Compute source root hash
             let file_refs: Vec<(&str, &[u8])> = sources
                 .iter()
                 .map(|(name, content)| (name.as_str(), content.as_bytes()))
                 .collect();
             let root_hash = tbn::provenance::source_root(&file_refs);
 
-            // Write manifest and SV files to cache dir (best-effort)
+            // Cache manifest (best-effort)
             let cache = tbn::provenance::cache_dir(&root_hash);
             std::fs::create_dir_all(&cache).ok();
             let manifest = tbn::provenance::source_manifest(&file_refs);
@@ -107,23 +125,23 @@ fn main() {
             )
             .ok();
 
-            // Compile each file
-            for (name, src) in &sources {
-                match tbn::build(src, name, Some(root_hash)) {
-                    Ok(sv_files) => {
-                        for sv_file in &sv_files {
-                            let out_path = output.join(&sv_file.name);
-                            if let Err(e) = std::fs::write(&out_path, &sv_file.content) {
-                                eprintln!("error writing {}: {e}", out_path.display());
-                                std::process::exit(1);
-                            }
-                            eprintln!("{name}: wrote {}", out_path.display());
-                            // Also cache the SV file (best-effort)
-                            std::fs::write(cache.join(&sv_file.name), &sv_file.content).ok();
+            // Concatenate all sources into a single compilation unit.
+            // Process/type/pipe definitions from earlier files are visible to later ones.
+            let (combined_src, display_name) = read_and_concat(&files);
+
+            match tbn::build(&combined_src, &display_name, Some(root_hash)) {
+                Ok(sv_files) => {
+                    for sv_file in &sv_files {
+                        let out_path = output.join(&sv_file.name);
+                        if let Err(e) = std::fs::write(&out_path, &sv_file.content) {
+                            eprintln!("error writing {}: {e}", out_path.display());
+                            std::process::exit(1);
                         }
+                        eprintln!("{display_name}: wrote {}", out_path.display());
+                        std::fs::write(cache.join(&sv_file.name), &sv_file.content).ok();
                     }
-                    Err(_) => std::process::exit(1),
                 }
+                Err(_) => std::process::exit(1),
             }
 
             eprintln!("provenance: {}", tbn::provenance::hex(&root_hash));
@@ -156,21 +174,14 @@ fn main() {
             }
         }
         Command::Graph { files } => {
-            for path in &files {
-                match std::fs::read_to_string(path) {
-                    Ok(src) => match tbn::emit_graph(&src, path.to_string_lossy().as_ref()) {
-                        Ok(dots) => {
-                            for dot in dots {
-                                print!("{dot}");
-                            }
-                        }
-                        Err(_) => std::process::exit(1),
-                    },
-                    Err(e) => {
-                        eprintln!("error: {}: {e}", path.display());
-                        std::process::exit(1);
+            let (combined_src, display_name) = read_and_concat(&files);
+            match tbn::emit_graph(&combined_src, &display_name) {
+                Ok(dots) => {
+                    for dot in dots {
+                        print!("{dot}");
                     }
                 }
+                Err(_) => std::process::exit(1),
             }
         }
         Command::Wave {
