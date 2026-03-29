@@ -650,6 +650,7 @@ where
 #[derive(Clone)]
 enum PipeItem {
     Queue(QueueDecl),
+    Memory(MemoryDecl),
     Instance(Instance),
 }
 
@@ -676,6 +677,36 @@ where
         )
         .then_ignore(just(Token::RParen))
         .map(|((name, ty), depth)| QueueDecl { name, ty, depth });
+
+    // Memory(K → V, depth = N, latency = M)
+    let memory_decl = just(Token::Let)
+        .ignore_then(ident_spanned)
+        .then_ignore(just(Token::Assign))
+        .then_ignore(just(Token::Memory))
+        .then_ignore(just(Token::LParen))
+        .then(type_expr_parser())
+        .then_ignore(just(Token::MapsTo))
+        .then(type_expr_parser())
+        .then(
+            just(Token::Comma)
+                .ignore_then(just(Token::Depth))
+                .ignore_then(just(Token::Assign))
+                .ignore_then(select! { Token::Int(n) => n }),
+        )
+        .then(
+            just(Token::Comma)
+                .ignore_then(just(Token::Latency))
+                .ignore_then(just(Token::Assign))
+                .ignore_then(select! { Token::Int(n) => n }),
+        )
+        .then_ignore(just(Token::RParen))
+        .map(|((((name, key_ty), val_ty), depth), latency)| MemoryDecl {
+            name,
+            key_ty,
+            val_ty,
+            depth,
+            latency,
+        });
 
     let port_binding = ident_spanned
         .then_ignore(just(Token::Assign))
@@ -704,6 +735,7 @@ where
         .ignore_then(ident_spanned)
         .then(
             choice((
+                memory_decl.map(PipeItem::Memory),
                 queue_decl.map(PipeItem::Queue),
                 instance.map(PipeItem::Instance),
             ))
@@ -713,16 +745,19 @@ where
         )
         .map(|(name, items)| {
             let mut queue_decls = vec![];
+            let mut memory_decls = vec![];
             let mut instances = vec![];
             for item in items {
                 match item {
                     PipeItem::Queue(q) => queue_decls.push(q),
+                    PipeItem::Memory(m) => memory_decls.push(m),
                     PipeItem::Instance(i) => instances.push(i),
                 }
             }
             Pipe {
                 name,
                 queue_decls,
+                memory_decls,
                 instances,
             }
         })

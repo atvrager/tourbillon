@@ -12,6 +12,8 @@ pub struct ProcessNetwork {
     pub name: String,
     pub graph: DiGraph<ProcessNode, QueueEdge>,
     pub instances: HashMap<String, NodeIndex>,
+    /// Type definitions reachable from this network (records, enums).
+    pub type_defs: HashMap<String, Ty>,
 }
 
 /// A process instance node in the graph.

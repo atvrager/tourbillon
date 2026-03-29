@@ -544,10 +544,19 @@ fn elaborate_pipe(
         return None;
     }
 
+    // Collect reachable type definitions (records and enums)
+    let mut type_defs = HashMap::new();
+    for (name, ty) in &type_env.type_defs {
+        if matches!(ty, Ty::Record { .. } | Ty::Enum { .. }) {
+            type_defs.insert(name.clone(), ty.clone());
+        }
+    }
+
     Some(ProcessNetwork {
         name: pipe.name.node.clone(),
         graph,
         instances,
+        type_defs,
     })
 }
 

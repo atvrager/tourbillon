@@ -247,3 +247,286 @@ pipe Top {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// Stage 2.0 — Lowerer completeness tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn struct_packed_typedef_emitted() {
+    let src = r#"
+record Decoded {
+    op  : Bits 32
+    rd  : Bits 32
+    imm : Bits 32
+}
+
+process Dec {
+    state: buf : Cell(Decoded, init = 0)
+    rule go {
+        let d = buf.take()
+        buf.put(Decoded { op = 0, rd = 1, imm = 42 })
+    }
+}
+
+pipe Top {
+    Dec {}
+}
+"#;
+    let files = tbn::build(src, "test.tbn", None).unwrap();
+    let sv = &files[0].content;
+    assert!(
+        sv.contains("typedef struct packed"),
+        "should emit typedef struct packed: {sv}"
+    );
+    assert!(
+        sv.contains("logic [31:0] op;"),
+        "should emit op field: {sv}"
+    );
+    assert!(
+        sv.contains("logic [31:0] rd;"),
+        "should emit rd field: {sv}"
+    );
+    assert!(
+        sv.contains("logic [31:0] imm;"),
+        "should emit imm field: {sv}"
+    );
+    assert!(
+        sv.contains("} Decoded;"),
+        "should close with type name: {sv}"
+    );
+    // Record construction should use typed cast
+    assert!(
+        sv.contains("Decoded'"),
+        "should use typed cast for record construction: {sv}"
+    );
+}
+
+#[test]
+fn enum_typedef_emitted() {
+    let src = r#"
+enum MemOp = Load | Store | None
+process Ex {
+    state: op : Cell(MemOp, init = 0)
+    rule go {
+        let o = op.take()
+        op.put(o)
+    }
+}
+
+pipe Top {
+    Ex {}
+}
+"#;
+    let files = tbn::build(src, "test.tbn", None).unwrap();
+    let sv = &files[0].content;
+    assert!(
+        sv.contains("typedef enum logic"),
+        "should emit typedef enum: {sv}"
+    );
+    assert!(sv.contains("Load = 0"), "should emit Load variant: {sv}");
+    assert!(sv.contains("Store = 1"), "should emit Store variant: {sv}");
+    assert!(sv.contains("None = 2"), "should emit None variant: {sv}");
+    assert!(sv.contains("} MemOp;"), "should close with type name: {sv}");
+}
+
+#[test]
+fn tuple_destructuring() {
+    let src = r#"
+process Pair {
+    consumes: input : Queue(Bits 32 × Bits 32)
+    produces: out   : Queue(Bits 32)
+    rule go {
+        let (a, b) = input.take()
+        out.put(a)
+    }
+}
+
+process Src {
+    produces: out : Queue(Bits 32 × Bits 32)
+    rule go {
+        out.put((42, 7))
+    }
+}
+
+process Sink {
+    consumes: inp : Queue(Bits 32)
+    rule go { let _ = inp.take() }
+}
+
+pipe Top {
+    let q = Queue(Bits 32 × Bits 32, depth = 2)
+    let r = Queue(Bits 32, depth = 2)
+    Src  { out = q }
+    Pair { input = q, out = r }
+    Sink { inp = r }
+}
+"#;
+    let files = tbn::build(src, "test.tbn", None).unwrap();
+    let top = files.iter().find(|f| f.name == "Top.sv").unwrap();
+    let sv = &top.content;
+    // Tuple destructuring should produce bit-slices
+    // (a, b) on Bits 32 × Bits 32 = 64 bits total
+    // a = [63:32], b = [31:0]
+    assert!(
+        sv.contains("[63:32]"),
+        "should emit bit-slice for first tuple element: {sv}"
+    );
+    assert!(
+        sv.contains("[31:0]"),
+        "should emit bit-slice for second tuple element: {sv}"
+    );
+}
+
+#[test]
+fn variant_match_option() {
+    let src = r#"
+process TryConsumer {
+    consumes: input : Queue(Bits 32)
+    produces: out   : Queue(Bits 32)
+    rule go {
+        match input.try_take() {
+            Some(x) => out.put(x)
+            None    => out.put(0)
+        }
+    }
+}
+
+process Src {
+    produces: out : Queue(Bits 32)
+    rule go { out.put(42) }
+}
+
+process Sink {
+    consumes: inp : Queue(Bits 32)
+    rule go { let _ = inp.take() }
+}
+
+pipe Top {
+    let q = Queue(Bits 32, depth = 2)
+    let r = Queue(Bits 32, depth = 2)
+    Src          { out = q }
+    TryConsumer  { input = q, out = r }
+    Sink         { inp = r }
+}
+"#;
+    let files = tbn::build(src, "test.tbn", None).unwrap();
+    let top = files.iter().find(|f| f.name == "Top.sv").unwrap();
+    let sv = &top.content;
+    // Should have valid-bit test for Some pattern
+    assert!(
+        sv.contains("[32]"),
+        "should test valid bit for Some pattern: {sv}"
+    );
+    // try_take deq_ready should be driven
+    assert!(
+        sv.contains("deq_ready"),
+        "should wire deq_ready for try_take: {sv}"
+    );
+}
+
+#[test]
+fn record_field_access() {
+    let src = r#"
+record Pair {
+    x : Bits 16
+    y : Bits 16
+}
+
+process FieldTest {
+    state: buf : Cell(Pair, init = 0)
+    produces: out : Queue(Bits 16)
+    rule go {
+        let p = buf.take()
+        out.put(p.x)
+        buf.put(p)
+    }
+}
+
+process Sink {
+    consumes: inp : Queue(Bits 16)
+    rule go { let _ = inp.take() }
+}
+
+pipe Top {
+    let q = Queue(Bits 16, depth = 2)
+    FieldTest { out = q }
+    Sink      { inp = q }
+}
+"#;
+    let files = tbn::build(src, "test.tbn", None).unwrap();
+    let top = files.iter().find(|f| f.name == "Top.sv").unwrap();
+    let sv = &top.content;
+    // With struct packed typedef, .x field access should appear in SV
+    assert!(sv.contains(".x"), "should emit field access .x: {sv}");
+}
+
+#[test]
+fn try_take_deq_ready_wired() {
+    let src = r#"
+process TryRead {
+    consumes: input : Queue(Bits 32)
+    rule go {
+        let _ = input.try_take()
+    }
+}
+
+process Src {
+    produces: out : Queue(Bits 32)
+    rule go { out.put(42) }
+}
+
+pipe Top {
+    let q = Queue(Bits 32, depth = 2)
+    Src     { out = q }
+    TryRead { input = q }
+}
+"#;
+    let files = tbn::build(src, "test.tbn", None).unwrap();
+    let top = files.iter().find(|f| f.name == "Top.sv").unwrap();
+    let sv = &top.content;
+    // try_take should drive deq_ready conditionally
+    assert!(
+        sv.contains("q_q_deq_valid)"),
+        "try_take deq_ready should include deq_valid condition: {sv}"
+    );
+}
+
+#[test]
+fn memory_primitive_desugars() {
+    let src = r#"
+type Addr = Bits 32
+type Word = Bits 32
+
+process Requester {
+    produces: rreq  : Queue(Addr)
+    consumes: rresp : Queue(Word)
+    produces: wreq  : Queue(Addr × Word)
+    rule read_mem {
+        rreq.put(0)
+        let _ = rresp.take()
+    }
+    rule write_mem {
+        wreq.put((0, 42))
+    }
+}
+
+pipe Top {
+    let imem = Memory(Addr -> Word, depth = 1024, latency = 1)
+    Requester {
+        rreq  = imem_read_req
+        rresp = imem_read_resp
+        wreq  = imem_write_req
+    }
+}
+"#;
+    // Memory should parse and desugar — the pipe will have memory queues
+    let files = tbn::build(src, "test.tbn", None).unwrap();
+    let top = files.iter().find(|f| f.name == "Top.sv").unwrap();
+    let sv = &top.content;
+    // Should have FIFO instances for the desugared memory queues
+    assert!(
+        sv.contains("imem_read_req") || sv.contains("imem_write_req"),
+        "should have desugared memory queues: {sv}"
+    );
+}

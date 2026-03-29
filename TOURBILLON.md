@@ -581,10 +581,30 @@ tbn init <name>                 Scaffold a new Tourbillon project
 |---|---|---|---|
 | **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output | **Complete** — lexer, parser, desugaring, type checker, linearity checker |
 | **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | **Complete** — All 7 stages implemented; `tbn build` produces provenance-tagged SV |
-| **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | Planned |
+| **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | **In progress** |
 | **3 — Verify** | `tbn status` / `tbn verify` over UART/JTAG | Provenance chain to running FPGA | Planned |
 | **4 — Formal** | mCRL2 export + deadlock checker | Verification story | Planned |
 | **5 — Session** | Protocol types on queue interfaces | Advanced type system | Planned |
+
+### Phase 2 Sub-Stages
+
+| Sub-stage | Deliverable | Status |
+|---|---|---|
+| **2.pre** | Update TOURBILLON.md roadmap with Phase 2 sub-stages | **Complete** |
+| **2.0a** | SV type declarations: `typedef struct packed` for records, `typedef enum logic` for enums | **Complete** |
+| **2.0b** | Record field access works with struct packed types | **Complete** |
+| **2.0c** | Tuple pattern destructuring via bit-slicing | **Complete** |
+| **2.0d** | Variant pattern matching (Option from try_take + user enums) | **Complete** |
+| **2.0e** | Array functional update expression (`regs[rd := val]`) | **Complete** |
+| **2.0f** | `try_take()` deq_ready wiring (assert when rule fires & data valid) | **Complete** |
+| **2.0g** | `Memory(K → V, depth, latency)` primitive: parse, desugar, elaborate, lower | **Complete** |
+| **2.1a** | RV32I `.tbn` source (`examples/rv32i.tbn`) | Planned |
+| **2.1b** | Hand-written RV32I SV support package (`sim/rv32i_pkg.sv`) | Planned |
+| **2.1c** | Simulation top-level with memory models (`sim/tb_top.sv`) | Planned |
+| **2.2** | Verilator infrastructure: C++ testbench, Makefile | Planned |
+| **2.3** | First instruction execution — smoke test passes under Verilator | Planned |
+| **2.4** | riscv-tests rv32ui compliance (39 tests), verified against Spike | Planned |
+| **2.5** | Golden SV tests, CI integration, documentation updates | Planned |
 
 ---
 

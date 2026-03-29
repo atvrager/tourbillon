@@ -160,6 +160,87 @@ fn collect_blocking_takes(rule: &Rule) -> BTreeSet<String> {
     takes
 }
 
+/// Collect port names that use `try_take()` in a rule.
+fn collect_try_takes(rule: &Rule) -> BTreeSet<String> {
+    let mut try_takes = BTreeSet::new();
+    for stmt in &rule.body {
+        collect_try_takes_in_stmt(&stmt.node, &mut try_takes);
+    }
+    try_takes
+}
+
+fn collect_try_takes_in_stmt(stmt: &Stmt, try_takes: &mut BTreeSet<String>) {
+    match stmt {
+        Stmt::Let { value, .. } => collect_try_takes_in_expr(&value.node, try_takes),
+        Stmt::Put { value, .. } => collect_try_takes_in_expr(&value.node, try_takes),
+        Stmt::Expr(e) => collect_try_takes_in_expr(&e.node, try_takes),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            collect_try_takes_in_expr(&cond.node, try_takes);
+            for s in then_body {
+                collect_try_takes_in_stmt(&s.node, try_takes);
+            }
+            for s in else_body {
+                collect_try_takes_in_stmt(&s.node, try_takes);
+            }
+        }
+        Stmt::Match { scrutinee, arms } => {
+            collect_try_takes_in_expr(&scrutinee.node, try_takes);
+            for arm in arms {
+                for s in &arm.body {
+                    collect_try_takes_in_stmt(&s.node, try_takes);
+                }
+            }
+        }
+    }
+}
+
+fn collect_try_takes_in_expr(expr: &Expr, try_takes: &mut BTreeSet<String>) {
+    match expr {
+        Expr::TryTake { queue } => {
+            try_takes.insert(queue.clone());
+        }
+        Expr::BinOp { lhs, rhs, .. } => {
+            collect_try_takes_in_expr(&lhs.node, try_takes);
+            collect_try_takes_in_expr(&rhs.node, try_takes);
+        }
+        Expr::UnaryOp { expr, .. } => collect_try_takes_in_expr(&expr.node, try_takes),
+        Expr::Tuple(items) => {
+            for item in items {
+                collect_try_takes_in_expr(&item.node, try_takes);
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for (_, val) in fields {
+                collect_try_takes_in_expr(&val.node, try_takes);
+            }
+        }
+        Expr::FieldAccess { expr, .. } => collect_try_takes_in_expr(&expr.node, try_takes),
+        Expr::Index { expr: e, index } => {
+            collect_try_takes_in_expr(&e.node, try_takes);
+            collect_try_takes_in_expr(&index.node, try_takes);
+        }
+        Expr::Update {
+            expr: e,
+            index,
+            value,
+        } => {
+            collect_try_takes_in_expr(&e.node, try_takes);
+            collect_try_takes_in_expr(&index.node, try_takes);
+            collect_try_takes_in_expr(&value.node, try_takes);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_try_takes_in_expr(&arg.node, try_takes);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_takes_in_stmt(stmt: &Stmt, takes: &mut BTreeSet<String>) {
     match stmt {
         Stmt::Let { value, .. } => collect_takes_in_expr(&value.node, takes),
@@ -285,6 +366,10 @@ struct RuleCtx<'a> {
     port_edges: &'a HashMap<String, EdgeIndex>,
     /// Variable name → inlined SV expression.
     vars: HashMap<String, String>,
+    /// Variable name → resolved type (for tuple destructuring, field access).
+    var_types: HashMap<String, Ty>,
+    /// Counter for generating unique temporary variable names.
+    temp_counter: usize,
 }
 
 impl<'a> SvEmitter<'a> {
@@ -342,6 +427,7 @@ impl<'a> SvEmitter<'a> {
         }
         self.blank();
 
+        self.emit_type_declarations();
         self.emit_queue_instances();
         self.emit_cell_declarations();
         self.emit_rule_enables();
@@ -352,6 +438,66 @@ impl<'a> SvEmitter<'a> {
 
         self.line("endmodule");
         self.out.clone()
+    }
+
+    // -----------------------------------------------------------------------
+    // Type declarations (struct packed, enum)
+    // -----------------------------------------------------------------------
+
+    /// Collect all record/enum types reachable from the network and emit
+    /// `typedef struct packed` / `typedef enum logic` at the top of the module.
+    fn emit_type_declarations(&mut self) {
+        let type_defs = &self.net.network.type_defs;
+        if type_defs.is_empty() {
+            return;
+        }
+
+        // Sort by name for deterministic output
+        let mut sorted: Vec<(&String, &Ty)> = type_defs.iter().collect();
+        sorted.sort_by_key(|(name, _)| (*name).clone());
+
+        // Collect which types are actually referenced by the network.
+        // For simplicity, emit all records and enums from the type registry.
+        let mut emitted_any = false;
+
+        for (name, ty) in &sorted {
+            match ty {
+                Ty::Record { fields, .. } => {
+                    self.line("typedef struct packed {");
+                    self.indent();
+                    for (fname, fty) in fields {
+                        let w = bit_width(fty);
+                        let wd = width_decl(w);
+                        self.line(&format!("logic {wd}{fname};"));
+                    }
+                    self.dedent();
+                    self.line(&format!("}} {name};"));
+                    self.blank();
+                    emitted_any = true;
+                }
+                Ty::Enum { variants, .. } => {
+                    let num_variants = variants.len() as u64;
+                    let tag_bits = if num_variants <= 1 {
+                        1
+                    } else {
+                        (num_variants as f64).log2().ceil() as u64
+                    };
+                    self.line(&format!("typedef enum logic [{}:0] {{", tag_bits - 1));
+                    self.indent();
+                    for (i, (vname, _)) in variants.iter().enumerate() {
+                        let sep = if i + 1 < variants.len() { "," } else { "" };
+                        self.line(&format!("{vname} = {i}{sep}"));
+                    }
+                    self.dedent();
+                    self.line(&format!("}} {name};"));
+                    self.blank();
+                    emitted_any = true;
+                }
+                _ => {}
+            }
+        }
+
+        let _ = emitted_any;
     }
 
     // -----------------------------------------------------------------------
@@ -584,6 +730,8 @@ impl<'a> SvEmitter<'a> {
                         rule_name: rule_name.clone(),
                         port_edges: &port_edges,
                         vars: HashMap::new(),
+                        var_types: HashMap::new(),
+                        temp_counter: 0,
                     };
 
                     self.line(&format!("// Rule: {inst}.{rule_name}"));
@@ -634,6 +782,20 @@ impl<'a> SvEmitter<'a> {
                                 .entry(edge_idx)
                                 .or_default()
                                 .push(format!("r_{inst}_{rule_name}_will_fire"));
+                        }
+                    }
+                }
+
+                // try_take: deq_ready = will_fire & deq_valid
+                let try_takes = collect_try_takes(rule);
+                for port_name in &try_takes {
+                    if let Some(&edge_idx) = port_edges.get(port_name) {
+                        let edge = &self.net.network.graph[edge_idx];
+                        if matches!(edge.kind, QueueEdgeKind::Queue) {
+                            let sname = sanitize(&edge.name);
+                            deq_ready_drivers.entry(edge_idx).or_default().push(format!(
+                                "(r_{inst}_{rule_name}_will_fire & q_{sname}_deq_valid)"
+                            ));
                         }
                     }
                 }
@@ -713,13 +875,21 @@ impl<'a> SvEmitter<'a> {
         match stmt {
             Stmt::Let { pattern, value } => {
                 let val_sv = self.emit_expr(&value.node, ctx);
-                if let Pattern::Bind(name) = &pattern.node {
-                    ctx.vars.insert(name.clone(), val_sv);
-                }
-                // Wildcard / tuple patterns: expression evaluated but no binding needed
+                let val_ty = self.infer_expr_type(&value.node, ctx);
+                self.bind_pattern(&pattern.node, &val_sv, &val_ty, ctx);
             }
             Stmt::Put { target, value } => {
-                let val_sv = self.emit_expr(&value.node, ctx);
+                // Special handling for array update expressions (regs[rd := val])
+                let val_sv = if let Expr::Update {
+                    expr: base,
+                    index,
+                    value: upd_val,
+                } = &value.node
+                {
+                    self.emit_array_update(&base.node, &index.node, &upd_val.node, ctx)
+                } else {
+                    self.emit_expr(&value.node, ctx)
+                };
                 if let Some(&edge_idx) = ctx.port_edges.get(&target.node) {
                     let edge = &self.net.network.graph[edge_idx];
                     let sname = sanitize(&edge.name);
@@ -763,25 +933,11 @@ impl<'a> SvEmitter<'a> {
             }
             Stmt::Match { scrutinee, arms } => {
                 let scrut_sv = self.emit_expr(&scrutinee.node, ctx);
+                let scrut_ty = self.infer_expr_type(&scrutinee.node, ctx);
+
                 for (i, arm) in arms.iter().enumerate() {
-                    let cond = match &arm.pattern.node {
-                        Pattern::Literal(Literal::Int(n)) => {
-                            format!("{scrut_sv} == {n}")
-                        }
-                        Pattern::Literal(Literal::Bool(b)) => {
-                            if *b {
-                                scrut_sv.clone()
-                            } else {
-                                format!("!{scrut_sv}")
-                            }
-                        }
-                        Pattern::Wildcard => "1'b1".to_string(),
-                        Pattern::Bind(name) => {
-                            ctx.vars.insert(name.clone(), scrut_sv.clone());
-                            "1'b1".to_string()
-                        }
-                        _ => "1'b1".to_string(),
-                    };
+                    let cond =
+                        self.emit_match_condition(&arm.pattern.node, &scrut_sv, &scrut_ty, ctx);
 
                     if i == 0 {
                         self.line(&format!("if ({cond}) begin"));
@@ -859,12 +1015,20 @@ impl<'a> SvEmitter<'a> {
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
-            Expr::Record { fields, .. } => {
+            Expr::Record { name, fields } => {
                 let parts: Vec<String> = fields
                     .iter()
-                    .map(|(_, val)| self.emit_expr(&val.node, ctx))
+                    .map(|(fname, val)| {
+                        let v = self.emit_expr(&val.node, ctx);
+                        format!("{}: {v}", fname.node)
+                    })
                     .collect();
-                format!("{{{}}}", parts.join(", "))
+                // Use typed assignment pattern for struct packed
+                if self.net.network.type_defs.contains_key(name) {
+                    format!("{name}'{{{}}}", parts.join(", "))
+                } else {
+                    format!("{{{}}}", parts.join(", "))
+                }
             }
             Expr::FieldAccess { expr, field } => {
                 let e = self.emit_expr(&expr.node, ctx);
@@ -881,10 +1045,270 @@ impl<'a> SvEmitter<'a> {
                     args.iter().map(|a| self.emit_expr(&a.node, ctx)).collect();
                 format!("{func}({})", arg_strs.join(", "))
             }
-            Expr::Update { .. } | Expr::MethodCall { .. } => {
-                "/* unsupported expr */ '0".to_string()
+            Expr::Update {
+                expr: e,
+                index,
+                value,
+            } => {
+                // Functional array update: a[i := v]
+                // We emit this as an inline function using SV automatic variable
+                let base = self.emit_expr(&e.node, ctx);
+                let idx = self.emit_expr(&index.node, ctx);
+                let val = self.emit_expr(&value.node, ctx);
+                // The caller must use this in a context where we can emit a block.
+                // For now, we track that an update is needed and the caller
+                // handles it. As a simple approach, emit a helper signal.
+                format!("/* update({base}, {idx}, {val}) */")
+            }
+            Expr::MethodCall { .. } => "/* unsupported expr */ '0".to_string(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pattern binding (tuple destructuring, variant matching)
+    // -----------------------------------------------------------------------
+
+    /// Bind a pattern to an SV expression, populating ctx.vars and ctx.var_types.
+    fn bind_pattern(&self, pattern: &Pattern, val_sv: &str, val_ty: &Ty, ctx: &mut RuleCtx) {
+        match pattern {
+            Pattern::Bind(name) => {
+                ctx.vars.insert(name.clone(), val_sv.to_string());
+                ctx.var_types.insert(name.clone(), val_ty.clone());
+            }
+            Pattern::Tuple(sub_pats) => {
+                // Destructure by bit-slicing the concatenated value.
+                // In SV, {a, b} has `a` in the MSB and `b` in the LSB.
+                if let Ty::Tuple(elem_tys) = val_ty {
+                    let total_width: u64 = elem_tys.iter().map(bit_width).sum();
+                    let mut bit_offset = 0u64; // from LSB
+                    // Process elements in reverse (last element = LSB)
+                    let elems: Vec<_> = sub_pats.iter().zip(elem_tys.iter()).collect();
+                    let mut slices: Vec<(usize, String, Ty)> = vec![];
+                    for (i, (_pat, ety)) in elems.iter().enumerate().rev() {
+                        let w = bit_width(ety);
+                        let sv_slice = if total_width == w && elems.len() == 1 {
+                            val_sv.to_string()
+                        } else if w == 1 {
+                            format!("{val_sv}[{bit_offset}]")
+                        } else {
+                            format!("{val_sv}[{}:{}]", bit_offset + w - 1, bit_offset)
+                        };
+                        slices.push((i, sv_slice, (*ety).clone()));
+                        bit_offset += w;
+                    }
+                    slices.sort_by_key(|(i, _, _)| *i);
+                    for (i, sv_slice, ety) in slices {
+                        self.bind_pattern(&sub_pats[i].node, &sv_slice, &ety, ctx);
+                    }
+                }
+                // If type is unknown, fall back to no binding
+            }
+            Pattern::Wildcard => {}                             // discard
+            Pattern::Variant { .. } | Pattern::Literal(_) => {} // handled in match arms
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Match condition emission
+    // -----------------------------------------------------------------------
+
+    /// Emit a match arm condition and bind any sub-pattern variables.
+    fn emit_match_condition(
+        &self,
+        pattern: &Pattern,
+        scrut_sv: &str,
+        scrut_ty: &Ty,
+        ctx: &mut RuleCtx,
+    ) -> String {
+        match pattern {
+            Pattern::Literal(Literal::Int(n)) => format!("{scrut_sv} == {n}"),
+            Pattern::Literal(Literal::Bool(b)) => {
+                if *b {
+                    scrut_sv.to_string()
+                } else {
+                    format!("!{scrut_sv}")
+                }
+            }
+            Pattern::Wildcard => "1'b1".to_string(),
+            Pattern::Bind(name) => {
+                ctx.vars.insert(name.clone(), scrut_sv.to_string());
+                ctx.var_types.insert(name.clone(), scrut_ty.clone());
+                "1'b1".to_string()
+            }
+            Pattern::Variant { name, fields } => {
+                // Case 1: Option type from try_take — scrutinee is {valid, data}
+                if let Ty::Option(inner_ty) = scrut_ty {
+                    let inner_w = bit_width(inner_ty);
+                    let total_w = 1 + inner_w;
+                    let valid_bit = if total_w > 1 {
+                        format!("{scrut_sv}[{}]", total_w - 1)
+                    } else {
+                        scrut_sv.to_string()
+                    };
+                    match name.as_str() {
+                        "Some" => {
+                            // Bind the inner value (lower bits)
+                            if fields.len() == 1 {
+                                let data_sv = if inner_w == 1 {
+                                    format!("{scrut_sv}[0]")
+                                } else {
+                                    format!("{scrut_sv}[{}:0]", inner_w - 1)
+                                };
+                                self.bind_pattern(&fields[0].node, &data_sv, inner_ty, ctx);
+                            }
+                            return valid_bit;
+                        }
+                        "None" => return format!("!{valid_bit}"),
+                        _ => {}
+                    }
+                }
+
+                // Case 2: User-defined enum — compare tag against variant name
+                if let Ty::Enum { variants, .. } = scrut_ty {
+                    let num_variants = variants.len() as u64;
+                    let tag_bits = if num_variants <= 1 {
+                        1
+                    } else {
+                        (num_variants as f64).log2().ceil() as u64
+                    };
+                    let max_payload: u64 = variants
+                        .iter()
+                        .map(|(_, fs)| fs.iter().map(bit_width).sum::<u64>())
+                        .max()
+                        .unwrap_or(0);
+
+                    if max_payload == 0 {
+                        // Pure enum (no payloads) — direct comparison
+                        return format!("{scrut_sv} == {name}");
+                    }
+
+                    // Enum with payloads: tag is in the MSBs
+                    let total_w = tag_bits + max_payload;
+                    let tag_sv = format!("{scrut_sv}[{}:{}]", total_w - 1, max_payload);
+                    // Bind payload fields if any
+                    if let Some((_, variant_fields)) = variants.iter().find(|(vn, _)| vn == name)
+                        && !variant_fields.is_empty()
+                        && !fields.is_empty()
+                    {
+                        let mut offset = 0u64;
+                        for (pat, vty) in fields.iter().zip(variant_fields.iter()).rev() {
+                            let w = bit_width(vty);
+                            let sv_slice = if w == 1 {
+                                format!("{scrut_sv}[{offset}]")
+                            } else {
+                                format!("{scrut_sv}[{}:{}]", offset + w - 1, offset)
+                            };
+                            self.bind_pattern(&pat.node, &sv_slice, vty, ctx);
+                            offset += w;
+                        }
+                    }
+                    return format!("{tag_sv} == {name}");
+                }
+
+                // Fallback: try as a simple enum constant name
+                format!("{scrut_sv} == {name}")
+            }
+            Pattern::Tuple(_) => {
+                self.bind_pattern(pattern, scrut_sv, scrut_ty, ctx);
+                "1'b1".to_string()
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Lightweight type inference for expressions
+    // -----------------------------------------------------------------------
+
+    /// Infer the type of an expression from context. Returns Ty::Error if unknown.
+    fn infer_expr_type(&self, expr: &Expr, ctx: &RuleCtx) -> Ty {
+        match expr {
+            Expr::Lit(Literal::Int(_)) => Ty::Bits(32), // default width
+            Expr::Lit(Literal::Bool(_)) => Ty::Bool,
+            Expr::Var(name) => ctx.var_types.get(name).cloned().unwrap_or(Ty::Error),
+            Expr::Take { queue } | Expr::Peek { queue } => {
+                if let Some(&edge_idx) = ctx.port_edges.get(queue) {
+                    self.net.network.graph[edge_idx].elem_ty.clone()
+                } else {
+                    Ty::Error
+                }
+            }
+            Expr::TryTake { queue } => {
+                if let Some(&edge_idx) = ctx.port_edges.get(queue) {
+                    Ty::Option(Box::new(self.net.network.graph[edge_idx].elem_ty.clone()))
+                } else {
+                    Ty::Error
+                }
+            }
+            Expr::Tuple(items) => {
+                let tys: Vec<Ty> = items
+                    .iter()
+                    .map(|item| self.infer_expr_type(&item.node, ctx))
+                    .collect();
+                Ty::Tuple(tys)
+            }
+            Expr::Record { name, .. } => {
+                if let Some(ty) = self.net.network.type_defs.get(name) {
+                    ty.clone()
+                } else {
+                    Ty::Error
+                }
+            }
+            Expr::FieldAccess { expr: e, field } => {
+                let parent_ty = self.infer_expr_type(&e.node, ctx);
+                if let Ty::Record { fields, .. } = &parent_ty {
+                    fields
+                        .iter()
+                        .find(|(n, _)| n == &field.node)
+                        .map(|(_, t)| t.clone())
+                        .unwrap_or(Ty::Error)
+                } else {
+                    Ty::Error
+                }
+            }
+            Expr::Index { expr: e, .. } => {
+                let parent_ty = self.infer_expr_type(&e.node, ctx);
+                if let Ty::Array { elem, .. } = &parent_ty {
+                    *elem.clone()
+                } else {
+                    Ty::Error
+                }
+            }
+            Expr::BinOp { lhs, .. } => self.infer_expr_type(&lhs.node, ctx),
+            Expr::UnaryOp { expr: e, .. } => self.infer_expr_type(&e.node, ctx),
+            _ => Ty::Error,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Array update statement-level emission
+    // -----------------------------------------------------------------------
+
+    /// Emit an array update as a begin/end block with an automatic variable.
+    /// Returns the name of the temporary holding the updated array.
+    fn emit_array_update(
+        &mut self,
+        base_expr: &Expr,
+        index_expr: &Expr,
+        value_expr: &Expr,
+        ctx: &mut RuleCtx,
+    ) -> String {
+        let base = self.emit_expr(base_expr, ctx);
+        let idx = self.emit_expr(index_expr, ctx);
+        let val = self.emit_expr(value_expr, ctx);
+        let base_ty = self.infer_expr_type(base_expr, ctx);
+
+        let tmp_name = format!("_upd_{}", ctx.temp_counter);
+        ctx.temp_counter += 1;
+
+        if let Ty::Array { elem, size } = &base_ty {
+            let elem_w = bit_width(elem);
+            let wd = width_decl(elem_w);
+            self.line(&format!("automatic logic {wd}{tmp_name} [0:{}];", size - 1));
+            self.line(&format!("{tmp_name} = {base};"));
+            self.line(&format!("{tmp_name}[{idx}] = {val};"));
+        }
+
+        tmp_name
     }
 }
 

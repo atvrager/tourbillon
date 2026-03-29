@@ -11,15 +11,210 @@ use crate::diagnostics::Diagnostic;
 /// - Cell declarations → depth-1 Queue with linearity annotations (future)
 /// - Pattern matching → decision trees (future)
 pub fn desugar(mut source: SourceFile, diagnostics: &mut Vec<Diagnostic>) -> SourceFile {
+    // Desugar Memory declarations into queue declarations + internal processes
+    let mut new_items: Vec<Spanned<Item>> = vec![];
     for item in &mut source.items {
-        if let Item::Process(ref mut process) = item.node {
-            for rule in &mut process.rules {
-                let new_body = desugar_stmts(&rule.body, diagnostics);
-                rule.body = new_body;
+        match &mut item.node {
+            Item::Process(process) => {
+                for rule in &mut process.rules {
+                    let new_body = desugar_stmts(&rule.body, diagnostics);
+                    rule.body = new_body;
+                }
             }
+            Item::Pipe(pipe) => {
+                for mem in &pipe.memory_decls {
+                    let (queues, process, instance) = desugar_memory(mem);
+                    pipe.queue_decls.extend(queues);
+                    pipe.instances.push(instance);
+                    new_items.push(Spanned::new(Item::Process(process), mem.name.span.clone()));
+                }
+                pipe.memory_decls.clear();
+            }
+            Item::TypeDef(_) => {}
+        }
+    }
+    // Insert generated processes before the pipes that use them
+    // Find the first Pipe item and insert before it
+    if !new_items.is_empty() {
+        let pipe_pos = source
+            .items
+            .iter()
+            .position(|i| matches!(i.node, Item::Pipe(_)))
+            .unwrap_or(source.items.len());
+        for (i, item) in new_items.into_iter().enumerate() {
+            source.items.insert(pipe_pos + i, item);
         }
     }
     source
+}
+
+/// Desugar a Memory declaration into queue declarations and a latency-modeling process.
+///
+/// `Memory(K → V, depth = N, latency = M)` becomes:
+/// - `{name}_read_req  : Queue(K, depth = 1)`
+/// - `{name}_read_resp : Queue(V, depth = 1)`
+/// - `{name}_write_req : Queue(K × V, depth = 1)`
+/// - An internal process `_Mem_{name}` that models the memory
+fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
+    let name = &mem.name.node;
+    let span = mem.name.span.clone();
+
+    let read_req = QueueDecl {
+        name: Spanned::new(format!("{name}_read_req"), span.clone()),
+        ty: Spanned::new(
+            TypeExpr::Queue {
+                elem: Box::new(mem.key_ty.clone()),
+                depth: Some(1),
+            },
+            span.clone(),
+        ),
+        depth: Some(1),
+    };
+
+    let read_resp = QueueDecl {
+        name: Spanned::new(format!("{name}_read_resp"), span.clone()),
+        ty: Spanned::new(
+            TypeExpr::Queue {
+                elem: Box::new(mem.val_ty.clone()),
+                depth: Some(1),
+            },
+            span.clone(),
+        ),
+        depth: Some(1),
+    };
+
+    let write_req = QueueDecl {
+        name: Spanned::new(format!("{name}_write_req"), span.clone()),
+        ty: Spanned::new(
+            TypeExpr::Queue {
+                elem: Box::new(Spanned::new(
+                    TypeExpr::Product(vec![mem.key_ty.clone(), mem.val_ty.clone()]),
+                    span.clone(),
+                )),
+                depth: Some(1),
+            },
+            span.clone(),
+        ),
+        depth: Some(1),
+    };
+
+    // Internal latency-modeling process:
+    // consumes read_req, produces read_resp, consumes write_req
+    // For latency=0: read_resp.put(storage[read_req.take()])
+    // For latency>0: pipeline of registers (simplified: just pass through for now)
+    let process_name = format!("_Mem_{name}");
+    let process = Process {
+        name: Spanned::new(process_name, span.clone()),
+        ports: vec![
+            Port {
+                kind: PortKind::Consumes,
+                name: Spanned::new("read_req".to_string(), span.clone()),
+                ty: Spanned::new(
+                    TypeExpr::Queue {
+                        elem: Box::new(mem.key_ty.clone()),
+                        depth: Some(1),
+                    },
+                    span.clone(),
+                ),
+            },
+            Port {
+                kind: PortKind::Produces,
+                name: Spanned::new("read_resp".to_string(), span.clone()),
+                ty: Spanned::new(
+                    TypeExpr::Queue {
+                        elem: Box::new(mem.val_ty.clone()),
+                        depth: Some(1),
+                    },
+                    span.clone(),
+                ),
+            },
+            Port {
+                kind: PortKind::Consumes,
+                name: Spanned::new("write_req".to_string(), span.clone()),
+                ty: Spanned::new(
+                    TypeExpr::Queue {
+                        elem: Box::new(Spanned::new(
+                            TypeExpr::Product(vec![mem.key_ty.clone(), mem.val_ty.clone()]),
+                            span.clone(),
+                        )),
+                        depth: Some(1),
+                    },
+                    span.clone(),
+                ),
+            },
+        ],
+        rules: vec![
+            // Rule: read — take addr from read_req, respond with data
+            Rule {
+                name: Spanned::new("read".to_string(), span.clone()),
+                body: vec![
+                    Spanned::new(
+                        Stmt::Let {
+                            pattern: Spanned::new(Pattern::Bind("addr".to_string()), span.clone()),
+                            value: Spanned::new(
+                                Expr::Take {
+                                    queue: "read_req".to_string(),
+                                },
+                                span.clone(),
+                            ),
+                        },
+                        span.clone(),
+                    ),
+                    // read_resp.put(0) — placeholder; actual memory behavior is in the SV wrapper
+                    Spanned::new(
+                        Stmt::Put {
+                            target: Spanned::new("read_resp".to_string(), span.clone()),
+                            value: Spanned::new(Expr::Lit(Literal::Int(0)), span.clone()),
+                        },
+                        span.clone(),
+                    ),
+                ],
+            },
+            // Rule: write — take (addr, data) from write_req
+            Rule {
+                name: Spanned::new("write".to_string(), span.clone()),
+                body: vec![Spanned::new(
+                    Stmt::Let {
+                        pattern: Spanned::new(
+                            Pattern::Tuple(vec![
+                                Spanned::new(Pattern::Bind("waddr".to_string()), span.clone()),
+                                Spanned::new(Pattern::Bind("wdata".to_string()), span.clone()),
+                            ]),
+                            span.clone(),
+                        ),
+                        value: Spanned::new(
+                            Expr::Take {
+                                queue: "write_req".to_string(),
+                            },
+                            span.clone(),
+                        ),
+                    },
+                    span.clone(),
+                )],
+            },
+        ],
+    };
+
+    // Generate the instance that wires the memory process to its queues
+    let instance = Instance {
+        process_name: Spanned::new(process.name.node.clone(), span.clone()),
+        bindings: vec![
+            PortBinding {
+                port: Spanned::new("read_req".to_string(), span.clone()),
+                target: Spanned::new(format!("{name}_read_req"), span.clone()),
+            },
+            PortBinding {
+                port: Spanned::new("read_resp".to_string(), span.clone()),
+                target: Spanned::new(format!("{name}_read_resp"), span.clone()),
+            },
+            PortBinding {
+                port: Spanned::new("write_req".to_string(), span.clone()),
+                target: Spanned::new(format!("{name}_write_req"), span.clone()),
+            },
+        ],
+    };
+
+    (vec![read_req, read_resp, write_req], process, instance)
 }
 
 fn desugar_stmts(stmts: &[Spanned<Stmt>], diagnostics: &mut Vec<Diagnostic>) -> Vec<Spanned<Stmt>> {

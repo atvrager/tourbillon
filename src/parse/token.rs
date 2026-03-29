@@ -28,6 +28,7 @@ pub enum Token<'src> {
     False,
     Init,
     Depth,
+    Latency,
 
     // Literals / identifiers
     Ident(&'src str),
@@ -54,6 +55,7 @@ pub enum Token<'src> {
 
     // Punctuation
     Times,      // ×
+    MapsTo,     // → or ->
     Dot,        // .
     Colon,      // :
     Assign,     // =
@@ -99,6 +101,7 @@ impl fmt::Display for Token<'_> {
             Token::False => write!(f, "false"),
             Token::Init => write!(f, "init"),
             Token::Depth => write!(f, "depth"),
+            Token::Latency => write!(f, "latency"),
             Token::Ident(s) => write!(f, "{s}"),
             Token::Int(n) => write!(f, "{n}"),
             Token::Plus => write!(f, "+"),
@@ -119,6 +122,7 @@ impl fmt::Display for Token<'_> {
             Token::LogicalAnd => write!(f, "&&"),
             Token::LogicalOr => write!(f, "||"),
             Token::Times => write!(f, "×"),
+            Token::MapsTo => write!(f, "→"),
             Token::Dot => write!(f, "."),
             Token::Colon => write!(f, ":"),
             Token::Assign => write!(f, "="),

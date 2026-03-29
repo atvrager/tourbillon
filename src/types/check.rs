@@ -327,10 +327,10 @@ pub fn check_stmt(stmt: &Spanned<Stmt>, env: &mut TypeEnv, diagnostics: &mut Vec
             check_expr(expr, env, diagnostics);
         }
         Stmt::Match { scrutinee, arms } => {
-            let _scrut_ty = check_expr(scrutinee, env, diagnostics);
+            let scrut_ty = check_expr(scrutinee, env, diagnostics);
             for arm in arms {
                 env.push_scope();
-                // TODO: bind pattern variables with proper types
+                bind_match_pattern(&arm.pattern, &scrut_ty, env, diagnostics);
                 check_stmts(&arm.body, env, diagnostics);
                 env.pop_scope();
             }
@@ -360,6 +360,45 @@ pub fn check_stmt(stmt: &Spanned<Stmt>, env: &mut TypeEnv, diagnostics: &mut Vec
 pub fn check_stmts(stmts: &[Spanned<Stmt>], env: &mut TypeEnv, diagnostics: &mut Vec<Diagnostic>) {
     for stmt in stmts {
         check_stmt(stmt, env, diagnostics);
+    }
+}
+
+/// Bind pattern variables from a match arm into the environment.
+#[allow(clippy::only_used_in_recursion)]
+fn bind_match_pattern(
+    pattern: &Spanned<Pattern>,
+    scrut_ty: &Ty,
+    env: &mut TypeEnv,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match &pattern.node {
+        Pattern::Bind(name) => {
+            env.define(name.clone(), scrut_ty.clone());
+        }
+        Pattern::Variant { name, fields } => {
+            // Option type: Some(x) binds x to the inner type
+            if let Ty::Option(inner) = scrut_ty {
+                if name == "Some" && fields.len() == 1 {
+                    bind_match_pattern(&fields[0], inner, env, diagnostics);
+                }
+                // None binds nothing
+            } else if let Ty::Enum { variants, .. } = scrut_ty {
+                // User enum: bind payload fields
+                if let Some((_, variant_fields)) = variants.iter().find(|(vn, _)| vn == name) {
+                    for (pat, vty) in fields.iter().zip(variant_fields.iter()) {
+                        bind_match_pattern(pat, vty, env, diagnostics);
+                    }
+                }
+            }
+        }
+        Pattern::Tuple(parts) => {
+            if let Ty::Tuple(tys) = scrut_ty {
+                for (p, t) in parts.iter().zip(tys.iter()) {
+                    bind_match_pattern(p, t, env, diagnostics);
+                }
+            }
+        }
+        Pattern::Wildcard | Pattern::Literal(_) => {}
     }
 }
 

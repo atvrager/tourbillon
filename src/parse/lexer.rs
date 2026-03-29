@@ -71,6 +71,7 @@ pub fn lexer<'src>()
             "false" => Token::False,
             "init" => Token::Init,
             "depth" => Token::Depth,
+            "latency" => Token::Latency,
             "_" => Token::Underscore,
             _ => Token::Ident(s),
         });
@@ -78,6 +79,7 @@ pub fn lexer<'src>()
     // Multi-char operators (must be tried before single-char)
     let op = choice((
         just("=>").to(Token::Arrow),
+        just("->").to(Token::MapsTo),
         just(":=").to(Token::ColonEq),
         just("==").to(Token::Eq),
         just("!=").to(Token::Neq),
@@ -115,6 +117,9 @@ pub fn lexer<'src>()
     // × (Unicode MULTIPLICATION SIGN U+00D7)
     let times = just('\u{00D7}').to(Token::Times);
 
+    // → (Unicode RIGHTWARDS ARROW U+2192)
+    let maps_to = just('\u{2192}').to(Token::MapsTo);
+
     // Comments: -- to end of line (ignored)
     let comment = just("--")
         .then(any().and_is(just('\n').not()).repeated())
@@ -123,7 +128,7 @@ pub fn lexer<'src>()
     // Whitespace
     let whitespace = any().filter(|c: &char| c.is_whitespace()).ignored();
 
-    let token = choice((int, op, times, single, ident));
+    let token = choice((int, op, times, maps_to, single, ident));
 
     // Padding: any mix of whitespace and comments
     let padding = whitespace.or(comment).repeated();

@@ -271,6 +271,7 @@ pub enum UnaryOp {
 pub struct Pipe {
     pub name: Spanned<String>,
     pub queue_decls: Vec<QueueDecl>,
+    pub memory_decls: Vec<MemoryDecl>,
     pub instances: Vec<Instance>,
 }
 
@@ -279,6 +280,16 @@ pub struct QueueDecl {
     pub name: Spanned<String>,
     pub ty: Spanned<TypeExpr>,
     pub depth: Option<u64>,
+}
+
+/// Memory(K → V, depth = N, latency = M) declaration in a pipe.
+#[derive(Debug, Clone)]
+pub struct MemoryDecl {
+    pub name: Spanned<String>,
+    pub key_ty: Spanned<TypeExpr>,
+    pub val_ty: Spanned<TypeExpr>,
+    pub depth: u64,
+    pub latency: u64,
 }
 
 #[derive(Debug, Clone)]
