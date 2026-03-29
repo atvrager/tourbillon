@@ -29,7 +29,7 @@ SOC_BIN     := $(SOC_OBJ_DIR)/sim_soc
 # Generate SystemVerilog from Tourbillon source
 sv:
 	mkdir -p $(SV_DIR)
-	$(TBN) build ../examples/rv32i.tbn -o $(SV_DIR)
+	$(TBN) build ../examples/cpu_core.tbn ../examples/rv32i.tbn -o $(SV_DIR)
 
 # Compile SV to C++ via Verilator and build the simulator
 NPROC := $(shell nproc 2>/dev/null || echo 4)
@@ -95,7 +95,7 @@ riscv-tests: build
 # Generate SoC SystemVerilog
 soc-sv:
 	mkdir -p $(SOC_SV_DIR)
-	$(TBN) build ../examples/marie.tbn -o $(SOC_SV_DIR)
+	$(TBN) build ../examples/cpu_core.tbn ../examples/marie.tbn -o $(SOC_SV_DIR)
 
 # Build SoC simulator
 soc-build: soc-sv

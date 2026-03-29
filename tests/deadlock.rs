@@ -14,8 +14,10 @@ fn graph_src(src: &str) -> Vec<String> {
 
 #[test]
 fn rv32i_no_deadlock_warnings() {
-    let src = std::fs::read_to_string("examples/rv32i.tbn").unwrap();
-    // The RV32I pipeline uses a credit-token Cell with init — should pass clean.
+    let core = std::fs::read_to_string("examples/cpu_core.tbn").unwrap();
+    let rv32i = std::fs::read_to_string("examples/rv32i.tbn").unwrap();
+    let src = format!("{core}\n\n{rv32i}");
+    // The RV32I pipeline uses a non-speculative next_pc queue with init — should pass clean.
     check_src(&src).unwrap();
 }
 
@@ -65,27 +67,32 @@ pipe Top {
 
 #[test]
 fn dot_rv32i_structure() {
-    let src = std::fs::read_to_string("examples/rv32i.tbn").unwrap();
+    let core = std::fs::read_to_string("examples/cpu_core.tbn").unwrap();
+    let rv32i = std::fs::read_to_string("examples/rv32i.tbn").unwrap();
+    let src = format!("{core}\n\n{rv32i}");
     let dots = graph_src(&src);
-    assert_eq!(dots.len(), 1);
-    let dot = &dots[0];
+    // Two pipes: CPUCore and CPU — find the CPU top-level graph
+    assert!(dots.len() >= 1, "expected at least one DOT graph");
+    let dot = dots
+        .iter()
+        .find(|d| d.starts_with("digraph CPU {"))
+        .expect("missing CPU graph");
 
-    // All four pipeline stages present
-    assert!(dot.contains("Fetch"), "missing Fetch");
-    assert!(dot.contains("Decode"), "missing Decode");
-    assert!(dot.contains("Execute"), "missing Execute");
-    assert!(dot.contains("Writeback"), "missing Writeback");
+    // All four pipeline stages present (prefixed with CPUCore_ from pipe hierarchy)
+    assert!(dot.contains("CPUCore_Fetch"), "missing Fetch");
+    assert!(dot.contains("CPUCore_Decode"), "missing Decode");
+    assert!(dot.contains("CPUCore_Execute"), "missing Execute");
+    assert!(dot.contains("CPUCore_Writeback"), "missing Writeback");
 
     // Key interconnects
-    assert!(dot.contains("fetch_q"), "missing fetch_q edge");
-    assert!(dot.contains("decode_q"), "missing decode_q edge");
-    assert!(dot.contains("wb_q"), "missing wb_q edge");
-    assert!(dot.contains("done_q"), "missing done_q credit token edge");
+    assert!(dot.contains("CPUCore_fetch_q"), "missing fetch_q edge");
+    assert!(dot.contains("CPUCore_decode_q"), "missing decode_q edge");
+    assert!(dot.contains("CPUCore_wb_q"), "missing wb_q edge");
+    assert!(dot.contains("CPUCore_next_pc_q"), "missing next_pc_q edge");
 
     // Cell self-loops
-    assert!(dot.contains("Fetch -> Fetch"), "missing pc Cell self-loop");
     assert!(
-        dot.contains("Writeback -> Writeback"),
+        dot.contains("CPUCore_Writeback -> CPUCore_Writeback"),
         "missing regfile Cell self-loop"
     );
 

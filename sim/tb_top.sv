@@ -4,7 +4,7 @@
 // mem_model instances for instruction and data memory. Monitors dmem
 // writes to the tohost address (0x80001000) for riscv-tests pass/fail.
 //
-// Pre-loads the done_q credit token so the pipeline can start fetching.
+// CPUCore sub-pipe ports are prefixed with CPUCore_ in the generated SV.
 
 import rv32i_pkg::*;
 
@@ -65,18 +65,18 @@ module tb_top (
         .clk   (clk),
         .rst_n (rst_n),
 
-        // imem read
-        .q_imem_read_req_enq_valid  (imem_rd_req_valid),
-        .q_imem_read_req_enq_ready  (imem_rd_req_ready),
-        .q_imem_read_req_enq_data   (imem_rd_req_data),
-        .q_imem_read_resp_deq_valid (imem_rd_resp_valid),
-        .q_imem_read_resp_deq_ready (imem_rd_resp_ready),
-        .q_imem_read_resp_deq_data  (imem_rd_resp_data),
+        // imem read (CPUCore sub-pipe prefix)
+        .q_CPUCore_imem_read_req_enq_valid  (imem_rd_req_valid),
+        .q_CPUCore_imem_read_req_enq_ready  (imem_rd_req_ready),
+        .q_CPUCore_imem_read_req_enq_data   (imem_rd_req_data),
+        .q_CPUCore_imem_read_resp_deq_valid (imem_rd_resp_valid),
+        .q_CPUCore_imem_read_resp_deq_ready (imem_rd_resp_ready),
+        .q_CPUCore_imem_read_resp_deq_data  (imem_rd_resp_data),
 
-        // imem write
-        .q_imem_write_req_enq_valid (imem_wr_req_valid),
-        .q_imem_write_req_enq_ready (imem_wr_req_ready),
-        .q_imem_write_req_enq_data  (imem_wr_req_data),
+        // imem write (CPUCore sub-pipe prefix)
+        .q_CPUCore_imem_write_req_enq_valid (imem_wr_req_valid),
+        .q_CPUCore_imem_write_req_enq_ready (imem_wr_req_ready),
+        .q_CPUCore_imem_write_req_enq_data  (imem_wr_req_data),
 
         // dmem read
         .q_dmem_read_req_enq_valid  (dmem_rd_req_valid),
@@ -113,9 +113,9 @@ module tb_top (
     );
 
     // -------------------------------------------------------------------------
-    // Data memory
+    // Data memory (registered response for split-phase Execute)
     // -------------------------------------------------------------------------
-    mem_model #(
+    mem_model_reg #(
         .DEPTH   (16384),
         .MEMFILE ("")           // loaded dynamically below
     ) dmem (
@@ -140,7 +140,7 @@ module tb_top (
         end
     end
 
-    // done_q credit token is pre-loaded by FIFO INIT_COUNT parameter
+    // next_pc_q is pre-loaded with reset PC (0x80000000) by FIFO INIT_VALUE
 
     // -------------------------------------------------------------------------
     // tohost monitor — watch for dmem writes to 0x80001000

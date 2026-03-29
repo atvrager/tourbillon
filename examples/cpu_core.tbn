@@ -1,0 +1,277 @@
+-- ============================================================
+-- CPU Core — shared between Marie Antoinette SoC and standalone
+-- ============================================================
+-- Split-phase, non-speculative RV32I pipeline.
+-- Extracted for multi-file compilation: tbn build cpu_core.tbn <target>.tbn
+
+-- ============================================================
+-- Type definitions
+-- ============================================================
+
+type Word   = Bits 32
+type Addr   = Bits 32
+type RegIdx = Bits 5
+
+enum MemOp = Load | Store | None
+
+record Decoded {
+    op      : Bits 4
+    rd      : RegIdx
+    rs1_val : Word
+    rs2_val : Word
+    imm     : Word
+    pc      : Addr
+    mem     : MemOp
+    wb      : Bool
+    is_br   : Bool
+    funct3  : Bits 3
+    opcode  : Bits 7
+}
+
+record BusReq {
+    we   : Bool
+    addr : Addr
+    data : Word
+}
+
+type BusResp = Word
+
+-- Stash record for split-phase Execute: saves decoded instruction fields
+-- across the memory request/response boundary.
+record ExecStash {
+    phase   : Bits 32
+    rd      : RegIdx
+    funct3  : Bits 3
+    rs2_val : Word
+    result  : Word
+    next_pc : Addr
+}
+
+-- ============================================================
+-- CPU pipeline stages
+-- ============================================================
+
+-- Non-speculative Fetch: waits for next_pc from Execute before fetching.
+-- No branch speculation, no redirect queue. One instruction at a time.
+-- First fetch uses the reset PC (0x80000000). Subsequent fetches use
+-- next_pc provided by Execute after the instruction completes.
+
+process Fetch {
+    consumes: next_pc        : Queue(Addr)
+    produces: fetch_out      : Queue(Addr × Word)
+    consumes: imem_read_resp : Queue(Word)
+    produces: imem_read_req  : Queue(Addr)
+    produces: imem_write_req : Queue(Addr × Word)
+
+    rule tick {
+        let target = next_pc.take()
+        imem_read_req.put(target)
+        let instr = imem_read_resp.take()
+        fetch_out.put((target, instr))
+    }
+}
+
+process Decode {
+    consumes: fetch_in   : Queue(Addr × Word)
+    produces: decode_out : Queue(Decoded)
+    peeks:    regfile    : Cell(Array(32, Word))
+
+    rule crack {
+        let (pc, raw) = fetch_in.take()
+        match regfile.peek() {
+            Some(regs) => {
+                let rd      = decode_rd(raw)
+                let rs1     = decode_rs1(raw)
+                let rs2     = decode_rs2(raw)
+                let funct3  = decode_funct3(raw)
+                let funct7  = decode_funct7(raw)
+                let opcode  = decode_opcode(raw)
+                let alu_op  = decode_alu_op(opcode, funct3, funct7)
+                let imm     = decode_imm(raw, opcode)
+                let mem_op  = decode_mem_op(opcode)
+                let needs_wb = decode_needs_wb(opcode, rd)
+                let is_br   = is_branch(opcode)
+                decode_out.put(Decoded {
+                    op      = alu_op,
+                    rd      = rd,
+                    rs1_val = regs[rs1],
+                    rs2_val = regs[rs2],
+                    imm     = imm,
+                    pc      = pc,
+                    mem     = mem_op,
+                    wb      = needs_wb,
+                    is_br   = is_br,
+                    funct3  = funct3,
+                    opcode  = opcode
+                })
+            }
+            None => {
+                -- Regfile not ready; stall
+            }
+        }
+    }
+}
+
+-- Split-phase Execute for CDC: memory operations span multiple cycles.
+-- Single rule with phase-based dispatch avoids priority conflicts.
+-- Phase 0: idle — take decoded instruction, compute, send mem request if needed
+-- Phase 1: waiting for load response (try_take on dmem_read_resp)
+-- Phase 2: waiting for store read-back
+-- Uses ExecStash Cell to save instruction fields across phases.
+
+-- Non-speculative Execute: always sends next_pc when instruction completes.
+-- For non-memory instructions, next_pc is sent immediately.
+-- For loads/stores, next_pc is sent after the response arrives.
+
+process Execute {
+    consumes: exec_in        : Queue(Decoded)
+    produces: next_pc        : Queue(Addr)
+    produces: writeback      : Queue(Bool × RegIdx × Word)
+    produces: dmem_read_req  : Queue(Addr)
+    consumes: dmem_read_resp : Queue(Word)
+    produces: dmem_write_req : Queue(Addr × Word)
+    state:    stash          : Cell(ExecStash, init = 0)
+
+    rule tick {
+        let s = stash.take()
+        if s.phase == 0 {
+            match exec_in.try_take() {
+                Some(d) => {
+                    let result = compute_result(d.op, d.opcode, d.rs1_val, d.rs2_val, d.imm, d.pc)
+
+                    -- Compute next PC: branch target if taken, else pc+4
+                    let npc = compute_next_pc(d.opcode, d.funct3, d.rs1_val, d.rs2_val, d.imm, d.pc)
+
+                    match d.mem {
+                        Load => {
+                            dmem_read_req.put(result)
+                            stash.put(ExecStash {
+                                phase = 1, rd = d.rd, funct3 = d.funct3,
+                                rs2_val = d.rs2_val, result = result,
+                                next_pc = npc
+                            })
+                        }
+                        Store => {
+                            dmem_read_req.put(result)
+                            stash.put(ExecStash {
+                                phase = 2, rd = d.rd, funct3 = d.funct3,
+                                rs2_val = d.rs2_val, result = result,
+                                next_pc = npc
+                            })
+                        }
+                        None => {
+                            writeback.put((d.wb, d.rd, result))
+                            next_pc.put(npc)
+                            stash.put(ExecStash {
+                                phase = 0, rd = 0, funct3 = 0,
+                                rs2_val = 0, result = 0, next_pc = 0
+                            })
+                        }
+                    }
+                }
+                None => {
+                    stash.put(s)
+                }
+            }
+        } else {
+            if s.phase == 1 {
+                match dmem_read_resp.try_take() {
+                    Some(raw_word) => {
+                        let val = load_extend(s.funct3, raw_word, s.result[1:0])
+                        writeback.put((true, s.rd, val))
+                        next_pc.put(s.next_pc)
+                        stash.put(ExecStash {
+                            phase = 0, rd = 0, funct3 = 0,
+                            rs2_val = 0, result = 0, next_pc = 0
+                        })
+                    }
+                    None => {
+                        stash.put(s)
+                    }
+                }
+            } else {
+                if s.phase == 2 {
+                    match dmem_read_resp.try_take() {
+                        Some(old_word) => {
+                            let merged = store_merge(s.funct3, old_word, s.rs2_val, s.result[1:0])
+                            dmem_write_req.put((s.result, merged))
+                            writeback.put((false, s.rd, s.result))
+                            next_pc.put(s.next_pc)
+                            stash.put(ExecStash {
+                                phase = 0, rd = 0, funct3 = 0,
+                                rs2_val = 0, result = 0, next_pc = 0
+                            })
+                        }
+                        None => {
+                            stash.put(s)
+                        }
+                    }
+                } else {
+                    stash.put(s)
+                }
+            }
+        }
+    }
+}
+
+process Writeback {
+    consumes: wb_in   : Queue(Bool × RegIdx × Word)
+    state:    regfile : Cell(Array(32, Word), init = 0)
+
+    rule commit {
+        let (wb, rd, val) = wb_in.take()
+        let regs = regfile.take()
+        if wb {
+            regfile.put(regs[rd := val])
+        } else {
+            regfile.put(regs)
+        }
+    }
+}
+
+-- ============================================================
+-- CPU pipe (imem local, dmem exposed as ports)
+-- ============================================================
+
+pipe CPUCore {
+    -- Inter-stage queues
+    let fetch_q  = Queue(Addr × Word, depth = 1)
+    let decode_q = Queue(Decoded, depth = 1)
+    let wb_q     = Queue(Bool × RegIdx × Word, depth = 1)
+
+    -- Next-PC queue: Execute → Fetch (non-speculative, no redirect needed)
+    -- Pre-loaded with reset PC via FIFO INIT_VALUE on reset.
+    let next_pc_q = Queue(Addr, depth = 1, init = 0x8000_0000)
+
+    -- Instruction memory (local, fast path)
+    let imem = Memory(Addr → Word, depth = 4096, latency = 1)
+
+    -- Data memory interface (exposed as pipe ports — no local Memory)
+    let dmem_rd_req  = Queue(Addr, depth = 1)
+    let dmem_rd_resp = Queue(Word, depth = 1)
+    let dmem_wr_req  = Queue(Addr × Word, depth = 1)
+
+    Fetch {
+        fetch_out      = fetch_q,
+        next_pc        = next_pc_q,
+        imem_read_req  = imem_read_req,
+        imem_read_resp = imem_read_resp,
+        imem_write_req = imem_write_req
+    }
+    Decode {
+        fetch_in   = fetch_q,
+        decode_out = decode_q,
+        regfile    = Writeback.regfile
+    }
+    Execute {
+        exec_in        = decode_q,
+        next_pc        = next_pc_q,
+        writeback      = wb_q,
+        dmem_read_req  = dmem_rd_req,
+        dmem_read_resp = dmem_rd_resp,
+        dmem_write_req = dmem_wr_req
+    }
+    Writeback {
+        wb_in   = wb_q
+    }
+}
