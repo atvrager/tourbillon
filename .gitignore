@@ -36,4 +36,7 @@ sim/tests/rv32ui/
 sim/tests/*.bin
 sim/tests/*.o
 sim/tests/*.elf
+sim/tests/*.hex
+sim/rtl_export/
+sim/marie_soc_rtl.zip
 *.fst
