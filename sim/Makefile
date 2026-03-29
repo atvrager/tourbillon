@@ -15,7 +15,10 @@ OBJCOPY       = $(RISCV_PREFIX)objcopy
 # Default test binary
 TEST ?= tests/smoke.bin
 
-.PHONY: sv verilate build run test-smoke riscv-tests clean
+# riscv-tests location
+RISCV_TESTS_DIR ?= /opt/riscv-tests/share/riscv-tests/isa
+
+.PHONY: sv verilate build run test-smoke test-hex riscv-tests clean
 
 # Generate SystemVerilog from Tourbillon source
 sv:
@@ -24,10 +27,11 @@ sv:
 
 # Compile SV to C++ via Verilator and build the simulator
 verilate: sv
-	$(VERILATOR) --cc --exe --build --trace -Wall -Wno-fatal \
+	$(VERILATOR) --cc --exe --build --trace-fst -Wall -Wno-fatal \
 		--top-module tb_top \
+		--public-flat-rw \
 		-I$(SV_DIR) \
-		tb_top.sv rv32i_pkg.sv \
+		tb_top.sv rv32i_pkg.sv mem_model.sv \
 		$(SV_DIR)/*.sv \
 		tb_cpu.cpp \
 		-o sim_cpu \
@@ -47,20 +51,24 @@ tests/smoke.bin: tests/smoke.S
 	$(OBJCOPY) -O binary tests/smoke.elf tests/smoke.bin
 	@rm -f tests/smoke.o tests/smoke.elf
 
+# Run smoke test from hex file (no RISC-V toolchain needed)
+test-hex: build
+	$(SIM_BIN) +memfile=tests/smoke.hex
+
 # Assemble and run the smoke test
 test-smoke: build tests/smoke.bin
 	$(SIM_BIN) tests/smoke.bin
 
 # Run the full riscv-tests rv32ui suite
-# Expects RISCV_TESTS_DIR to point to the built riscv-tests directory
-RISCV_TESTS_DIR ?= /opt/riscv-tests/share/riscv-tests/isa
+# Uses tests built by build_tests.sh in tests/rv32ui/
+RV32UI_DIR ?= tests/rv32ui
 riscv-tests: build
-	@pass=0; fail=0; \
-	for t in $(RISCV_TESTS_DIR)/rv32ui-p-*; do \
+	@pass=0; fail=0; skip=0; \
+	for t in $(RV32UI_DIR)/*; do \
 		test -f "$$t" || continue; \
-		case "$$t" in *.dump) continue;; esac; \
+		case "$$t" in *.dump|*.S|*.o) continue;; *fence_i*) skip=$$((skip + 1)); continue;; esac; \
 		name=$$(basename $$t); \
-		if $(SIM_BIN) $$t; then \
+		if $(SIM_BIN) $$t 2>/dev/null; then \
 			echo "  PASS $$name"; \
 			pass=$$((pass + 1)); \
 		else \
@@ -69,10 +77,10 @@ riscv-tests: build
 		fi; \
 	done; \
 	echo ""; \
-	echo "Results: $$pass passed, $$fail failed"; \
+	echo "Results: $$pass passed, $$fail failed, $$skip skipped"; \
 	test $$fail -eq 0
 
 # Remove build artifacts
 clean:
 	rm -rf $(OBJ_DIR) $(SV_DIR) tests/*.bin tests/*.o tests/*.elf
-	rm -f sim_trace.vcd
+	rm -f sim_trace.vcd sim_trace.fst

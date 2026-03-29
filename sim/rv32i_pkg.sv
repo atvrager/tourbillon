@@ -178,14 +178,21 @@ package rv32i_pkg;
       return 2'd2;  // None
   endfunction
 
-  // Decode needs_wb: true for all except STORE and BRANCH
-  function automatic decode_needs_wb(input [6:0] opcode);
-    return (opcode != OP_STORE) && (opcode != OP_BRANCH);
+  localparam logic [6:0] OP_FENCE  = 7'b0001111;
+  localparam logic [6:0] OP_SYSTEM = 7'b1110011;
+
+  // Decode needs_wb: true for ALU, LOAD, LUI, AUIPC, JAL, JALR
+  // False for STORE, BRANCH, FENCE, SYSTEM, or when rd=x0
+  function automatic decode_needs_wb(input [6:0] opcode, input [4:0] rd);
+    return (rd != 5'd0) &&
+           (opcode != OP_STORE) && (opcode != OP_BRANCH) &&
+           (opcode != OP_FENCE) && (opcode != OP_SYSTEM);
   endfunction
 
   function automatic is_branch(input [6:0] opcode);
-    return (opcode == OP_BRANCH);
+    return (opcode == OP_BRANCH) || (opcode == OP_JAL) || (opcode == OP_JALR);
   endfunction
+
 
   function automatic branch_taken(input [2:0] funct3, input [31:0] a, input [31:0] b);
     logic taken;
@@ -199,6 +206,117 @@ package rv32i_pkg;
       default: taken = 1'b0;
     endcase
     return taken;
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Opcode-aware result computation (fixes LUI, AUIPC, JAL, JALR, R-type)
+  // -----------------------------------------------------------------------
+
+  function automatic [31:0] compute_result(
+    input [3:0] alu_op, input [6:0] opcode,
+    input [31:0] rs1, input [31:0] rs2, input [31:0] imm, input [31:0] pc
+  );
+    case (opcode)
+      OP_LUI:    return imm;
+      OP_AUIPC:  return pc + imm;
+      OP_JAL:    return pc + 32'd4;     // return address
+      OP_JALR:   return pc + 32'd4;     // return address
+      OP_R_TYPE: return alu(alu_op, rs1, rs2);  // R-type uses rs2, not imm
+      default:   return alu(alu_op, rs1, imm);  // I-type ALU, loads, etc.
+    endcase
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Branch/jump target computation
+  // -----------------------------------------------------------------------
+
+  function automatic [31:0] compute_branch_target(
+    input [6:0] opcode, input [31:0] pc, input [31:0] rs1, input [31:0] imm
+  );
+    if (opcode == OP_JALR)
+      return (rs1 + imm) & 32'hFFFFFFFE;  // JALR: (rs1+imm) with bit 0 cleared
+    else
+      return pc + imm;  // JAL, conditional branches: PC-relative
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Unified taken check (branches + unconditional jumps)
+  // -----------------------------------------------------------------------
+
+  function automatic is_taken(
+    input [6:0] opcode, input [2:0] funct3, input [31:0] a, input [31:0] b
+  );
+    if (opcode == OP_JAL || opcode == OP_JALR)
+      return 1'b1;
+    return branch_taken(funct3, a, b);
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Sub-word load extension (LB, LH, LBU, LHU, LW)
+  // -----------------------------------------------------------------------
+
+  function automatic [31:0] load_extend(
+    input [2:0] funct3, input [31:0] word, input [1:0] byte_offset
+  );
+    logic [7:0]  b;
+    logic [15:0] h;
+    case (byte_offset)
+      2'b00: begin b = word[ 7: 0]; h = word[15: 0]; end
+      2'b01: begin b = word[15: 8]; h = word[23: 8]; end
+      2'b10: begin b = word[23:16]; h = word[31:16]; end
+      2'b11: begin b = word[31:24]; h = {word[7:0], word[31:24]}; end // wrap
+      default: begin b = 8'b0; h = 16'b0; end
+    endcase
+    case (funct3)
+      3'b000: return {{24{b[7]}}, b};      // LB  — sign-extend byte
+      3'b001: return {{16{h[15]}}, h};     // LH  — sign-extend halfword
+      3'b010: return word;                  // LW  — full word
+      3'b100: return {24'b0, b};            // LBU — zero-extend byte
+      3'b101: return {16'b0, h};            // LHU — zero-extend halfword
+      default: return word;
+    endcase
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Sub-word store merge — merge partial write into existing word
+  // -----------------------------------------------------------------------
+
+  function automatic [31:0] store_merge(
+    input [2:0] funct3, input [31:0] old_word, input [31:0] data, input [1:0] byte_offset
+  );
+    logic [31:0] result;
+    result = old_word;
+    case (funct3)
+      3'b000: begin  // SB — store byte
+        case (byte_offset)
+          2'b00: result[ 7: 0] = data[7:0];
+          2'b01: result[15: 8] = data[7:0];
+          2'b10: result[23:16] = data[7:0];
+          2'b11: result[31:24] = data[7:0];
+          default: ;
+        endcase
+      end
+      3'b001: begin  // SH — store halfword
+        case (byte_offset)
+          2'b00: result[15: 0] = data[15:0];
+          2'b10: result[31:16] = data[15:0];
+          default: ;  // misaligned — ignore for now
+        endcase
+      end
+      3'b010: begin  // SW — store word
+        result = data;
+      end
+      default: result = old_word;
+    endcase
+    return result;
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Decode opcode from raw instruction (for pipeline use)
+  // -----------------------------------------------------------------------
+
+  function automatic [6:0] decode_opcode(input [31:0] instr);
+    return instr[6:0];
   endfunction
 
 endpackage

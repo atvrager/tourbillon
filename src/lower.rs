@@ -1,6 +1,6 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use petgraph::graph::EdgeIndex;
+use petgraph::graph::{EdgeIndex, NodeIndex};
 
 use crate::ast::*;
 use crate::ir::*;
@@ -373,6 +373,10 @@ struct SvEmitter<'a> {
     out: String,
     indent: usize,
     provenance: Option<[u8; 32]>,
+    /// Edge indices for memory-exposed edges. Value is true if CPU is the writer (enq side).
+    memory_edges: HashMap<EdgeIndex, bool>,
+    /// Node indices for memory stub process nodes.
+    memory_stub_nodes: HashSet<NodeIndex>,
 }
 
 /// Per-rule context for expression inlining.
@@ -391,11 +395,32 @@ struct RuleCtx<'a> {
 
 impl<'a> SvEmitter<'a> {
     fn new(net: &'a ScheduledNetwork, provenance: Option<[u8; 32]>) -> Self {
+        let mut memory_edges = HashMap::new();
+        let mut memory_stub_nodes = HashSet::new();
+
+        for node_idx in net.network.graph.node_indices() {
+            if net.network.graph[node_idx].is_memory_stub {
+                memory_stub_nodes.insert(node_idx);
+            }
+        }
+
+        for edge_idx in net.network.graph.edge_indices() {
+            if let Some((src, dst)) = net.network.graph.edge_endpoints(edge_idx)
+                && (memory_stub_nodes.contains(&src) || memory_stub_nodes.contains(&dst))
+            {
+                // CPU is writer if the memory stub is the destination (consumer)
+                let cpu_is_writer = memory_stub_nodes.contains(&dst);
+                memory_edges.insert(edge_idx, cpu_is_writer);
+            }
+        }
+
         Self {
             net,
             out: String::new(),
             indent: 0,
             provenance,
+            memory_edges,
+            memory_stub_nodes,
         }
     }
 
@@ -425,11 +450,24 @@ impl<'a> SvEmitter<'a> {
 
     fn emit(&mut self) -> String {
         let pipe_name = self.net.network.name.clone();
+        let mem_ports = self.collect_memory_port_decls();
 
         self.line(&format!("module {pipe_name} ("));
         self.indent();
-        self.line("input  wire clk,");
-        self.line("input  wire rst_n");
+        if mem_ports.is_empty() {
+            self.line("input  wire clk,");
+            self.line("input  wire rst_n");
+        } else {
+            self.line("input  wire clk,");
+            self.line("input  wire rst_n,");
+            for (i, port) in mem_ports.iter().enumerate() {
+                if i + 1 < mem_ports.len() {
+                    self.line(&format!("{port},"));
+                } else {
+                    self.line(port);
+                }
+            }
+        }
         self.dedent();
         self.line(");");
 
@@ -518,6 +556,38 @@ impl<'a> SvEmitter<'a> {
     }
 
     // -----------------------------------------------------------------------
+    // Memory port declarations (for memory stub edges exposed as module ports)
+    // -----------------------------------------------------------------------
+
+    fn collect_memory_port_decls(&self) -> Vec<String> {
+        let mut ports = vec![];
+        // Sort by edge index for deterministic output
+        let mut sorted: Vec<(EdgeIndex, bool)> =
+            self.memory_edges.iter().map(|(&k, &v)| (k, v)).collect();
+        sorted.sort_by_key(|(idx, _)| idx.index());
+
+        for (edge_idx, cpu_is_writer) in &sorted {
+            let edge = &self.net.network.graph[*edge_idx];
+            let sname = sanitize(&edge.name);
+            let w = bit_width(&edge.elem_ty);
+            let wd = width_decl(w);
+
+            if *cpu_is_writer {
+                // CPU writes (enq side is CPU-facing)
+                ports.push(format!("output logic        q_{sname}_enq_valid"));
+                ports.push(format!("input  wire         q_{sname}_enq_ready"));
+                ports.push(format!("output logic {wd}q_{sname}_enq_data"));
+            } else {
+                // CPU reads (deq side is CPU-facing)
+                ports.push(format!("input  wire         q_{sname}_deq_valid"));
+                ports.push(format!("output logic        q_{sname}_deq_ready"));
+                ports.push(format!("input  wire  {wd}q_{sname}_deq_data"));
+            }
+        }
+        ports
+    }
+
+    // -----------------------------------------------------------------------
     // Queue FIFO declarations and instances
     // -----------------------------------------------------------------------
 
@@ -525,6 +595,10 @@ impl<'a> SvEmitter<'a> {
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
             if !matches!(edge.kind, QueueEdgeKind::Queue) {
+                continue;
+            }
+            // Skip memory-exposed edges — no FIFO, signals are module ports
+            if self.memory_edges.contains_key(&edge_idx) {
                 continue;
             }
             let sname = sanitize(&edge.name);
@@ -608,6 +682,9 @@ impl<'a> SvEmitter<'a> {
 
     fn emit_rule_enables(&mut self) {
         for node_idx in self.net.network.graph.node_indices() {
+            if self.memory_stub_nodes.contains(&node_idx) {
+                continue;
+            }
             let node = &self.net.network.graph[node_idx];
             let schedule = &self.net.schedules[&node_idx];
             let inst = &node.instance_name;
@@ -730,10 +807,16 @@ impl<'a> SvEmitter<'a> {
             }
         }
 
-        // Default Queue enq signals
+        // Default Queue enq signals (skip dead-side memory edges)
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
             if matches!(edge.kind, QueueEdgeKind::Queue) {
+                // For memory edges where CPU is reader, enq side is dead (no stub to drive it)
+                if let Some(&cpu_is_writer) = self.memory_edges.get(&edge_idx)
+                    && !cpu_is_writer
+                {
+                    continue;
+                }
                 let sname = sanitize(&edge.name);
                 self.line(&format!("q_{sname}_enq_valid = 1'b0;"));
                 self.line(&format!("q_{sname}_enq_data = '0;"));
@@ -742,8 +825,11 @@ impl<'a> SvEmitter<'a> {
 
         self.blank();
 
-        // Rule bodies
+        // Rule bodies (skip memory stub nodes)
         for node_idx in self.net.network.graph.node_indices() {
+            if self.memory_stub_nodes.contains(&node_idx) {
+                continue;
+            }
             let node = &self.net.network.graph[node_idx];
             let schedule = &self.net.schedules[&node_idx];
             let inst = node.instance_name.clone();
@@ -800,6 +886,9 @@ impl<'a> SvEmitter<'a> {
         let mut deq_ready_drivers: HashMap<EdgeIndex, Vec<String>> = HashMap::new();
 
         for node_idx in self.net.network.graph.node_indices() {
+            if self.memory_stub_nodes.contains(&node_idx) {
+                continue;
+            }
             let node = &self.net.network.graph[node_idx];
             let inst = &node.instance_name;
 
@@ -845,6 +934,12 @@ impl<'a> SvEmitter<'a> {
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
             if !matches!(edge.kind, QueueEdgeKind::Queue) {
+                continue;
+            }
+            // Skip memory edges where CPU is writer — deq side is dead
+            if let Some(&cpu_is_writer) = self.memory_edges.get(&edge_idx)
+                && cpu_is_writer
+            {
                 continue;
             }
             let sname = sanitize(&edge.name);
@@ -1077,7 +1172,13 @@ impl<'a> SvEmitter<'a> {
             Expr::Index { expr: e, index } => {
                 let base = self.emit_expr(&e.node, ctx);
                 let idx = self.emit_expr(&index.node, ctx);
-                format!("{base}[{idx}]")
+                let base_ty = self.infer_expr_type(&e.node, ctx);
+                if let Ty::Array { elem, .. } = &base_ty {
+                    let elem_w = bit_width(elem);
+                    format!("{base}[{idx} * {elem_w} +: {elem_w}]")
+                } else {
+                    format!("{base}[{idx}]")
+                }
             }
             Expr::Call { func, args } => {
                 let arg_strs: Vec<String> =

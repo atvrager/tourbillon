@@ -24,6 +24,9 @@ pub struct ProcessNode {
     pub rules: Vec<Rule>,
     pub ports: Vec<ResolvedPort>,
     pub span: Span,
+    /// True for compiler-generated memory stub processes (_Mem_*).
+    /// The lowerer skips these and exposes their queue edges as module ports.
+    pub is_memory_stub: bool,
 }
 
 /// A port on a process instance with its resolved type and optional edge binding.

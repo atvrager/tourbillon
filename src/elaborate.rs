@@ -166,6 +166,7 @@ fn elaborate_pipe(
             rules: proc_def.rules.clone(),
             ports,
             span: inst.process_name.span.clone(),
+            is_memory_stub: proc_name.starts_with("_Mem_"),
         };
 
         let node_idx = graph.add_node(node);

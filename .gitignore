@@ -29,3 +29,8 @@ target
 sim/obj_dir/
 sim/sv_out/
 sim/*.vcd
+sim/*.fst
+sim/tests/rv32ui/
+sim/tests/*.bin
+sim/tests/*.o
+sim/tests/*.elf

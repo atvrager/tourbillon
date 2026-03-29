@@ -102,6 +102,9 @@ pub struct Port {
     pub kind: PortKind,
     pub name: Spanned<String>,
     pub ty: Spanned<TypeExpr>,
+    /// Array port size: `regs[32] : Cell(Word)` has `array_size = Some(32)`.
+    /// Expanded by desugar into 32 individual ports before type checking.
+    pub array_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

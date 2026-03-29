@@ -594,9 +594,19 @@ where
     port_kind
         .then_ignore(just(Token::Colon))
         .then(select! { Token::Ident(s) => s }.map_with(|s: &str, e| spn(s.to_string(), e.span())))
+        .then(
+            select! { Token::Int(n) => n }
+                .delimited_by(just(Token::LBrack), just(Token::RBrack))
+                .or_not(),
+        )
         .then_ignore(just(Token::Colon))
         .then(type_expr_parser())
-        .map(|((kind, name), ty)| Port { kind, name, ty })
+        .map(|(((kind, name), array_size), ty)| Port {
+            kind,
+            name,
+            ty,
+            array_size,
+        })
 }
 
 fn rule_parser<'src, I>()

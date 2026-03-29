@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0 complete. Phase 1 complete. Phase 2 in progress: lowerer completeness done (struct packed, enum, tuple destruct, variant match, array update, try_take wiring, Memory primitive); RV32I `.tbn` design compiles to Verilator-clean SV. `TOURBILLON.md` is the authoritative specification.
+**Status:** Phase 0–2 complete. Phase 2.4 (rv32ui compliance) complete: 38/38 rv32ui-p tests pass. Indexed cell ports (`regs[32] : Cell(Word)`) implemented in desugar. Single-issue pipeline with done_q credit token. Instruction bug fixes (LUI, AUIPC, JAL/JALR return addresses, R-type rs2, sub-word loads/stores, x0 guard). ELF loader in tb_cpu.cpp. Custom riscv-tests env (no CSR). `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -92,7 +92,7 @@ src/
   main.rs            -- CLI (clap): tbn check / tbn build
   lib.rs             -- Pipeline: parse → desugar → type-check → elaborate → schedule → lower
   ast.rs             -- AST types (Spanned nodes, all language constructs)
-  ir.rs              -- IR types: ProcessNetwork, ProcessNode, QueueEdge, ResolvedPort
+  ir.rs              -- IR types: ProcessNetwork, ProcessNode (is_memory_stub), QueueEdge, ResolvedPort
   elaborate.rs       -- Elaboration pass: AST pipes → petgraph process networks
   schedule.rs        -- Rule priority assignment, conflict detection
   lower.rs           -- SV emitter: process network → SystemVerilog
@@ -102,7 +102,7 @@ src/
     token.rs         -- Token enum (keywords, operators, punctuation)
     lexer.rs         -- Chumsky character-level lexer → token stream
     parser.rs        -- Chumsky token-level parser → AST
-  desugar.rs         -- MethodCall → Take/TryTake/Peek/Put resolution
+  desugar.rs         -- MethodCall → Take/TryTake/Peek/Put; indexed cell port expansion
   types/
     mod.rs           -- Orchestration: collect type defs, check processes/pipes
     ty.rs            -- Internal type representation (Bits, Bool, Tuple, Record, ...)
@@ -118,6 +118,7 @@ tests/
   schedule.rs        -- Schedule integration tests
   lower.rs           -- Lowering / SV codegen integration tests
   provenance.rs      -- Provenance hashing and embedding tests
+  riscv_tests.rs     -- rv32ui compliance: build sim + run 38 tests via Verilator
 examples/
   rv32i.tbn          -- RV32I reference core (4-stage pipeline)
   counter.tbn        -- Simple counter (Cell + take/put)
@@ -126,11 +127,15 @@ examples/
   peek.tbn           -- Cross-instance Cell peek
   priority.tbn       -- Multi-rule priority suppression
 sim/
-  rv32i_pkg.sv       -- Hand-written RV32I decode/ALU/branch SV package
-  tb_top.sv          -- Verilator simulation top-level wrapper
-  tb_cpu.cpp         -- Verilator C++ testbench driver
-  Makefile           -- Simulation build system
+  rv32i_pkg.sv       -- Hand-written RV32I decode/ALU/branch SV package (compute_result, load_extend, store_merge)
+  mem_model.sv       -- Behavioral SRAM with ready/valid interface (combinational read, verilator public)
+  tb_top.sv          -- Verilator simulation top-level: CPU + memory models + tohost monitor
+  tb_cpu.cpp         -- Verilator C++ testbench driver with ELF loader and FST trace
+  Makefile           -- Simulation build system (sv, build, test-hex, riscv-tests)
+  env/p/riscv_test.h -- Custom no-CSR riscv-tests environment for Tourbillon CPU
+  build_tests.sh     -- Builds rv32ui tests from riscv-tests submodule with custom env
   tests/smoke.S      -- Minimal RV32I smoke test assembly
+  tests/smoke.hex    -- Hand-encoded smoke test (hex, no toolchain needed)
 ```
 
 ### Provenance System

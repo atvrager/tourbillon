@@ -1,0 +1,32 @@
+// RV32I smoke test with pipeline hazard avoidance (3 NOPs between deps)
+// Base address: 0x80000000
+// NOP = addi x0, x0, 0 = 0x00000013
+// Goal: write 1 to tohost (0x80001000) then spin
+00100093  // 00: addi x1, x0, 1
+00000013  // 04: nop
+00000013  // 08: nop
+00000013  // 0C: nop
+00200113  // 10: addi x2, x0, 2
+00000013  // 14: nop
+00000013  // 18: nop
+00000013  // 1C: nop
+002081B3  // 20: add  x3, x1, x2    (x3 = 3)
+00000013  // 24: nop
+00000013  // 28: nop
+00000013  // 2C: nop
+80001237  // 30: lui  x4, 0x80001   (x4 = 0x80001000)
+00000013  // 34: nop
+00000013  // 38: nop
+00000013  // 3C: nop
+00100293  // 40: addi x5, x0, 1     (x5 = 1)
+00000013  // 44: nop
+00000013  // 48: nop
+00000013  // 4C: nop
+00522023  // 50: sw   x5, 0(x4)     (mem[0x80001000] = 1 → tohost)
+00000013  // 54: nop (spin — tohost detected by testbench)
+00000013  // 58: nop
+00000013  // 5C: nop
+00000013  // 60: nop
+00000013  // 64: nop
+00000013  // 68: nop
+00000013  // 6C: nop

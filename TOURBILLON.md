@@ -335,7 +335,35 @@ pipe CPU {
 }
 ```
 
-### 3.1 What the Compiler Produces
+### 3.1 Design Revision: Queue-Per-Register File
+
+The reference design above uses `Cell(Array(32, Word))` as a monolithic register file. Decode reads operands via `peek()`, which sees only the committed (pre-writeback) state. In a pipelined execution, this creates read-after-write hazards: a dependent instruction may read a stale register value if the producer hasn't committed yet. The current workaround is NOP padding between dependent instructions.
+
+A more idiomatic Tourbillon design treats each architectural register as its own queue:
+
+```
+-- Each register is a depth-1 queue (= Cell with queue semantics)
+process RegFile {
+  state: x0  : Cell(Word, init = 0)   -- hardwired zero
+  state: x1  : Cell(Word, init = 0)
+  state: x2  : Cell(Word, init = 0)
+  -- ... x3 through x31 ...
+}
+```
+
+With queue-per-register:
+
+- **Natural hazard resolution.** `let v = regs_rs1.take()` blocks until the register has a value. If a prior instruction hasn't committed yet, the consumer stalls automatically — the queue is empty. No forwarding muxes, no scoreboards.
+- **Ordering falls out of queue semantics.** The producer `put()`s the result; the consumer `take()`s it. Single-writer/single-reader discipline enforces program order on each register.
+- **Borrow pattern for non-consuming reads.** A read that doesn't consume (e.g., Decode reading rs1 and rs2 while the register remains available for later instructions) uses the Cell borrow idiom: `let v = reg.take(); reg.put(v)`. The take/put pair is atomic within the rule.
+- **x0 hardwired.** x0's queue always contains 0; puts are silently discarded.
+- **Superscalar extension.** Multi-reader queues or a broadcast mechanism extend naturally to dual-issue or wider machines.
+
+This is the queue philosophy applied to its logical conclusion: the DFF *is* a degenerate queue, and the register file *is* 32 parallel queues. Pipeline interlocks become an emergent property of queue occupancy rather than an engineered bypass network.
+
+**Status (Phase 2.4):** The indexed cell port syntax (`state: regs[32] : Cell(Word)`) is implemented in the compiler's desugar pass. It expands `regs[32]` into 32 individual Cell ports and rewrites `regs[idx].take()` / `.put()` / `.peek()` into match statements over each element. The current RV32I reference design uses a monolithic `Cell(Array(32, Word))` with single-issue done_q credit token for hazard avoidance (~4 CPI). The queue-per-register approach with throughput optimisation is a future phase.
+
+### 3.2 What the Compiler Produces
 
 Each construct lowers predictably:
 
@@ -581,7 +609,7 @@ tbn init <name>                 Scaffold a new Tourbillon project
 |---|---|---|---|
 | **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output | **Complete** — lexer, parser, desugaring, type checker, linearity checker |
 | **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | **Complete** — All 7 stages implemented; `tbn build` produces provenance-tagged SV |
-| **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | **In progress** |
+| **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | **Complete** — 38/38 rv32ui-p tests pass |
 | **3 — Verify** | `tbn status` / `tbn verify` over UART/JTAG | Provenance chain to running FPGA | Planned |
 | **4 — Formal** | mCRL2 export + deadlock checker | Verification story | Planned |
 | **5 — Session** | Protocol types on queue interfaces | Advanced type system | Planned |
@@ -602,8 +630,8 @@ tbn init <name>                 Scaffold a new Tourbillon project
 | **2.1b** | Hand-written RV32I SV support package (`sim/rv32i_pkg.sv`) | **Complete** |
 | **2.1c** | Simulation top-level with memory models (`sim/tb_top.sv`) | **Complete** |
 | **2.2** | Verilator infrastructure: C++ testbench, Makefile | **Complete** |
-| **2.3** | First instruction execution — smoke test passes under Verilator | **In progress** — Verilator build succeeds, memory backing needed |
-| **2.4** | riscv-tests rv32ui compliance (39 tests), verified against Spike | Planned |
+| **2.3** | First instruction execution — smoke test passes under Verilator | **Complete** — Memory stubs exposed as module ports; behavioral SRAM models; array index codegen fix; smoke test PASS (23 cycles) |
+| **2.4** | riscv-tests rv32ui compliance | **Complete** — 38/38 rv32ui-p tests pass (fence_i skipped). Single-issue pipeline (~4 CPI) with done_q credit token. Instruction fixes: compute_result (LUI/AUIPC/JAL/JALR/R-type), branch targets, sub-word loads/stores, x0 guard. ELF loader, custom no-CSR test env, `cargo test` integration. Indexed cell ports (`regs[32] : Cell(T)`) implemented in desugar as language extension. |
 | **2.5** | Golden SV tests, CI integration, documentation updates | Planned |
 
 ---
