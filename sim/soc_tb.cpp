@@ -180,51 +180,80 @@ int main(int argc, char **argv) {
     // next_pc_q is pre-loaded with 0x80000000 by FIFO INIT_VALUE on reset
 
     // --- Simulation ---
-    // All three clock domains run in lock-step (same frequency).
+    // Three clock domains at different frequencies matching the FPGA MMCM:
+    //   cpu_clk  = 100 MHz  (period 10 ns → half-period  5 ns)
+    //   xbar_clk = 150 MHz  (period  6.67 ns → half-period 3.33 ns)
+    //   dev_clk  =  50 MHz  (period 20 ns → half-period 10 ns)
+    //
+    // We use a 1 ns simulation tick. Each clock toggles at its half-period.
+    // LCM(5, 10/3, 10) = 10 ns → one full cpu cycle every 10 ticks.
+    // To keep it integer: use 3.333→3/4 alternating for xbar (10 ticks per 3 cycles).
+    //
+    // Simplified: use tick-based scheduling with half-period accumulators.
+    //   cpu:  toggle every 5 ticks  (100 MHz)
+    //   xbar: toggle every 10/3 ticks ≈ 3,3,4 pattern (150 MHz)
+    //   dev:  toggle every 10 ticks (50 MHz)
+
     struct timespec ts_start, ts_end;
     clock_gettime(CLOCK_MONOTONIC, &ts_start);
-    uint64_t cycle = 0;
+    uint64_t cpu_cycles = 0;
     int result = -1;
-
-    // UART drain: after tohost detected, continue for enough cycles to let
-    // the UART TX shift register finish serializing all queued bytes.
-    // 14 chars * 10 bits/char * 869 cycles/bit ≈ 122K cycles.
     uint64_t drain_remaining = 0;
 
-    while (cycle < max_cycles && (result < 0 || drain_remaining > 0)) {
-        // Rising edge — all domains
-        dut->cpu_clk  = 1;
-        dut->xbar_clk = 1;
-        dut->dev_clk  = 1;
-        dut->eval();
-        if (tfp) tfp->dump(t++);
+    // Half-period in simulation ticks (1 tick = 1 ns)
+    // cpu:  5 ns, xbar: 3.333 ns (use fixed-point ×3), dev: 10 ns
+    uint64_t cpu_next  = 5;   // next toggle tick
+    uint64_t xbar_next = 3;   // ≈3.33, we alternate 3/3/4
+    uint64_t dev_next  = 10;
+    unsigned xbar_phase = 0;  // 0→3, 1→3, 2→4 ticks (avg 3.33)
 
-        // Check tohost
-        if (result < 0) {
+    for (t = t; t < (max_cycles * 10 + t) && (result < 0 || drain_remaining > 0); t++) {
+        bool any_toggle = false;
+
+        if (t >= cpu_next) {
+            dut->cpu_clk = !dut->cpu_clk;
+            cpu_next = t + 5;
+            if (dut->cpu_clk) cpu_cycles++;
+            any_toggle = true;
+        }
+        if (t >= xbar_next) {
+            dut->xbar_clk = !dut->xbar_clk;
+            // 150 MHz: half-periods of 3,3,4 ns (average 3.333)
+            unsigned hp = (xbar_phase < 2) ? 3 : 4;
+            xbar_next = t + hp;
+            xbar_phase = (xbar_phase + 1) % 3;
+            any_toggle = true;
+        }
+        if (t >= dev_next) {
+            dut->dev_clk = !dut->dev_clk;
+            dev_next = t + 10;
+            any_toggle = true;
+        }
+
+        if (!any_toggle) continue;
+
+        dut->eval();
+        if (tfp) tfp->dump(t);
+
+        // Check tohost on cpu_clk rising edges
+        if (dut->cpu_clk && result < 0) {
             uint32_t th = dut->tohost;
             if (th != 0) {
                 if (th == 1) {
                     result = 0;
-                    drain_remaining = 10000;  // drain UART TX buffer (3 MBaud)
+                    drain_remaining = 100000;  // drain UART TX buffer
                 } else {
                     result = 1;
-                    fprintf(stderr, "[soc_tb] FAIL: tohost = 0x%08x (test %u) at cycle %lu\n",
-                            th, th >> 1, cycle);
+                    fprintf(stderr, "[soc_tb] FAIL: tohost = 0x%08x (test %u) at cpu cycle %lu\n",
+                            th, th >> 1, cpu_cycles);
                 }
             }
-        } else if (drain_remaining > 0) {
+        } else if (drain_remaining > 0 && dut->dev_clk) {
             drain_remaining--;
         }
-
-        // Falling edge — all domains
-        dut->cpu_clk  = 0;
-        dut->xbar_clk = 0;
-        dut->dev_clk  = 0;
-        dut->eval();
-        if (tfp) tfp->dump(t++);
-
-        cycle++;
     }
+
+    uint64_t cycle = cpu_cycles;  // report cpu cycles
 
     clock_gettime(CLOCK_MONOTONIC, &ts_end);
     double elapsed = (ts_end.tv_sec - ts_start.tv_sec)

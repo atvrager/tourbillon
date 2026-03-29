@@ -694,6 +694,8 @@ impl<'a> SvEmitter<'a> {
                         .any(|&ni| self.net.network.graph[ni].instance_name == *inst)
             });
 
+        self.line("/* verilator lint_off UNUSEDSIGNAL */");
+        self.line("/* verilator lint_off UNUSEDPARAM */");
         self.line(&format!("module {pipe_name} ("));
         self.indent();
 

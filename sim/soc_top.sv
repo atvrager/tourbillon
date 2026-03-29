@@ -8,6 +8,7 @@
 // Three clock domains are driven independently by the C++ testbench:
 // cpu_clk, xbar_clk, dev_clk.
 
+/* verilator lint_off IMPORTSTAR */
 import rv32i_pkg::*;
 
 /* verilator lint_off UNOPTFLAT */
@@ -66,6 +67,9 @@ module soc_top (
     wire         uart_rts_enq_valid;
     wire         uart_rts_enq_ready;
     wire         uart_rts_enq_data;   // RTS output from Marie
+    wire         uart_cts_deq_valid;
+    wire         uart_cts_deq_ready;
+    wire         uart_cts_deq_data;   // CTS input to Marie
 
     // -------------------------------------------------------------------------
     // Marie SoC instance
@@ -118,7 +122,12 @@ module soc_top (
         // UART RTS pin (Marie produces)
         .q_UartPhy_rts_pin_enq_valid (uart_rts_enq_valid),
         .q_UartPhy_rts_pin_enq_ready (uart_rts_enq_ready),
-        .q_UartPhy_rts_pin_enq_data  (uart_rts_enq_data)
+        .q_UartPhy_rts_pin_enq_data  (uart_rts_enq_data),
+
+        // UART CTS pin (Marie consumes — flow control input)
+        .q_UartPhy_cts_pin_deq_valid (uart_cts_deq_valid),
+        .q_UartPhy_cts_pin_deq_ready (uart_cts_deq_ready),
+        .q_UartPhy_cts_pin_deq_data  (uart_cts_deq_data)
     );
 
     // -------------------------------------------------------------------------
@@ -188,6 +197,12 @@ module soc_top (
     // UART RTS — always accept
     // -------------------------------------------------------------------------
     assign uart_rts_enq_ready = 1'b1;
+
+    // -------------------------------------------------------------------------
+    // UART CTS — always clear to send (active-low: 0 = clear)
+    // -------------------------------------------------------------------------
+    assign uart_cts_deq_valid = 1'b1;
+    assign uart_cts_deq_data  = 1'b0;  // CTS asserted (clear to send)
 
     // -------------------------------------------------------------------------
     // Instruction memory — cpu domain clock

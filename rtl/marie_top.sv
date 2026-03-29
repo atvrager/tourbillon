@@ -27,6 +27,7 @@ module marie_top (
     output wire uart_tx,
     input  wire uart_rx,
     output wire uart_rts_n,
+    input  wire uart_cts_n,
 
     // CPU instruction memory interface (cpu_clk domain)
     output wire        imem_rd_req_valid,
@@ -228,7 +229,12 @@ module marie_top (
         // UART RTS pin (Marie produces → physical RTS)
         .q_UartPhy_rts_pin_enq_valid (uart_rts_enq_valid),
         .q_UartPhy_rts_pin_enq_ready (1'b1),
-        .q_UartPhy_rts_pin_enq_data  (uart_rts_enq_data)
+        .q_UartPhy_rts_pin_enq_data  (uart_rts_enq_data),
+
+        // UART CTS pin (physical CTS → Marie consumes, active-low inverted)
+        .q_UartPhy_cts_pin_deq_valid (1'b1),
+        .q_UartPhy_cts_pin_deq_ready (),
+        .q_UartPhy_cts_pin_deq_data  (~uart_cts_n)
     );
 
 endmodule

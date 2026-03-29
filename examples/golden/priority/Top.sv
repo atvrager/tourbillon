@@ -1,3 +1,5 @@
+/* verilator lint_off UNUSEDSIGNAL */
+/* verilator lint_off UNUSEDPARAM */
 module Top (
     input  wire clk,
     input  wire rst_n

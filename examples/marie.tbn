@@ -491,6 +491,7 @@ process UartTx {
     state:    baud_cnt : Cell(Bits 16, init = 0)
     state:    bit_cnt  : Cell(Bits 4, init = 0)
     produces: tx_pin   : Queue(Bits 1)
+    consumes: cts_pin  : Queue(Bits 1)
 
     rule tick {
         let s = sr.take()
@@ -499,16 +500,42 @@ process UartTx {
         tx_pin.put(s[0:0])
 
         if bn == 0 {
-            match tx_data.try_take() {
-                Some(byte) => {
-                    sr.put(0x200 | (byte << 1))
-                    baud_cnt.put(BAUD_DIV)
-                    bit_cnt.put(10)
+            -- Only load new byte when CTS asserted (active-low: 0 = clear)
+            match cts_pin.try_take() {
+                Some(cts) => {
+                    if cts == 0 {
+                        match tx_data.try_take() {
+                            Some(byte) => {
+                                sr.put(0x200 | (byte << 1))
+                                baud_cnt.put(BAUD_DIV)
+                                bit_cnt.put(10)
+                            }
+                            None => {
+                                sr.put(s)
+                                baud_cnt.put(0)
+                                bit_cnt.put(0)
+                            }
+                        }
+                    } else {
+                        sr.put(s)
+                        baud_cnt.put(0)
+                        bit_cnt.put(0)
+                    }
                 }
                 None => {
-                    sr.put(s)
-                    baud_cnt.put(0)
-                    bit_cnt.put(0)
+                    -- No CTS sample available: treat as clear to send
+                    match tx_data.try_take() {
+                        Some(byte) => {
+                            sr.put(0x200 | (byte << 1))
+                            baud_cnt.put(BAUD_DIV)
+                            bit_cnt.put(10)
+                        }
+                        None => {
+                            sr.put(s)
+                            baud_cnt.put(0)
+                            bit_cnt.put(0)
+                        }
+                    }
                 }
             }
         } else {
@@ -630,9 +657,10 @@ pipe UartPhy {
     let tx_pin  = external Queue(Bits 1, depth = 1)
     let rx_pin  = external Queue(Bits 1, depth = 1)
     let rts_pin = external Queue(Bits 1, depth = 1)
+    let cts_pin = external Queue(Bits 1, depth = 1)
 
     UartDevice { req = uart_req, resp = uart_resp, tx_data = tx_q, rx_data = rx_q }
-    UartTx { tx_data = tx_q, tx_pin = tx_pin }
+    UartTx { tx_data = tx_q, tx_pin = tx_pin, cts_pin = cts_pin }
     UartRx { rx_data = rx_q, rx_pin = rx_pin, rts_pin = rts_pin }
 }
 

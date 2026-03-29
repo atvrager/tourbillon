@@ -146,9 +146,9 @@ RTL_DIR := ../rtl
 # Xilinx primitives (IBUFDS, MMCME4_ADV, BUFGCE) are stubbed via bbox-sys
 # since we don't have the Vivado unisim library on the lint path.
 rtl-check: soc-sv
-	$(VERILATOR) --lint-only -Wall -Wno-fatal --bbox-sys \
+	$(VERILATOR) --lint-only -Wall -Wno-fatal \
 		-I$(SOC_SV_DIR) \
-		$(RTL_DIR)/marie_top.sv rv32i_pkg.sv \
+		$(RTL_DIR)/marie_top.sv $(RTL_DIR)/xilinx_stubs.sv rv32i_pkg.sv \
 		$(SOC_SV_DIR)/*.sv
 
 # Remove build artifacts

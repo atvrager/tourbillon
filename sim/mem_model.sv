@@ -9,6 +9,7 @@
 // its first read request, so the memory must not gate resp_valid
 // on req_valid (that would create a deadlock).
 
+/* verilator lint_off UNUSEDSIGNAL */
 module mem_model #(
     parameter DEPTH   = 16384,   // 64 KB default (16K × 32-bit words)
     parameter MEMFILE = ""

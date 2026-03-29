@@ -2,6 +2,7 @@
 // Hand-written SystemVerilog utility functions for decoding and executing
 // the RV32I base integer instruction set.
 
+/* verilator lint_off UNUSEDSIGNAL */  // decode functions use bit slices of instr
 package rv32i_pkg;
 
   // -----------------------------------------------------------------------
