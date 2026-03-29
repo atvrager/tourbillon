@@ -160,28 +160,42 @@ rtl-check: soc-sv
 RTL_EXPORT_DIR := rtl_export
 RTL_ZIP        := marie_soc_rtl.zip
 
-rtl-export: soc-sv
+# Build hello.hex from hello.S (needed for FPGA BRAM init)
+# objcopy -O verilog gives byte-addressed hex; verilog2hex.py converts to
+# word-addressed $readmemh format suitable for Vivado BRAM initialisation.
+tests/hello.hex: tests/hello.elf
+	$(OBJCOPY) -O verilog tests/hello.elf tests/hello.hex.raw
+	python3 verilog2hex.py tests/hello.hex.raw tests/hello.hex
+	@rm -f tests/hello.hex.raw
+
+rtl-export: soc-sv tests/hello.elf tests/hello.hex
 	@rm -rf $(RTL_EXPORT_DIR) $(RTL_ZIP)
 	@mkdir -p $(RTL_EXPORT_DIR)
 	@# Copy sources in topo order (packages → leaves → middle → top)
-	@cp rv32i_pkg.sv                   $(RTL_EXPORT_DIR)/1_rv32i_pkg.sv
-	@cp $(SOC_SV_DIR)/tbn_fifo.sv      $(RTL_EXPORT_DIR)/2_tbn_fifo.sv
-	@cp $(SOC_SV_DIR)/tbn_async_fifo.sv $(RTL_EXPORT_DIR)/3_tbn_async_fifo.sv
-	@cp $(SOC_SV_DIR)/Marie.sv         $(RTL_EXPORT_DIR)/4_Marie.sv
-	@cp $(RTL_DIR)/marie_top.sv        $(RTL_EXPORT_DIR)/5_marie_top.sv
-	@# Generate filelist.f (relative paths, topo-sorted)
+	@cp rv32i_pkg.sv                    $(RTL_EXPORT_DIR)/1_rv32i_pkg.sv
+	@cp $(SOC_SV_DIR)/tbn_fifo.sv       $(RTL_EXPORT_DIR)/2_tbn_fifo.sv
+	@cp $(SOC_SV_DIR)/tbn_async_fifo.sv  $(RTL_EXPORT_DIR)/3_tbn_async_fifo.sv
+	@cp $(SOC_SV_DIR)/Marie.sv          $(RTL_EXPORT_DIR)/4_Marie.sv
+	@cp $(RTL_DIR)/fpga_mem.sv          $(RTL_EXPORT_DIR)/5_fpga_mem.sv
+	@cp $(RTL_DIR)/marie_top.sv         $(RTL_EXPORT_DIR)/6_marie_top.sv
+	@cp $(RTL_DIR)/marie_fpga.sv        $(RTL_EXPORT_DIR)/7_marie_fpga.sv
+	@cp tests/hello.hex                 $(RTL_EXPORT_DIR)/hello.hex
+	@# Generate filelist.f
 	@printf '// Marie Antoinette SoC — Vivado source file list (topo-sorted)\n' \
 		> $(RTL_EXPORT_DIR)/filelist.f
-	@printf '// Add files in this order, or use: read_verilog -sv [glob *.sv]\n' \
+	@printf '// Toplevel: marie_fpga (standalone with internal BRAM, hello.hex baked in)\n' \
 		>> $(RTL_EXPORT_DIR)/filelist.f
-	@printf '// Xilinx primitives (IBUFDS, MMCME4_ADV, BUFGCE) come from unisim.\n' \
+	@printf '// Alt top:  marie_top  (external memory ports, no BRAM)\n' \
 		>> $(RTL_EXPORT_DIR)/filelist.f
-	@for f in 1_rv32i_pkg.sv 2_tbn_fifo.sv 3_tbn_async_fifo.sv 4_Marie.sv 5_marie_top.sv; do \
+	@printf '// Xilinx primitives (IBUFDS, MMCME4_ADV, BUFGCE) resolved from unisim.\n' \
+		>> $(RTL_EXPORT_DIR)/filelist.f
+	@for f in 1_rv32i_pkg.sv 2_tbn_fifo.sv 3_tbn_async_fifo.sv \
+	          4_Marie.sv 5_fpga_mem.sv 6_marie_top.sv 7_marie_fpga.sv; do \
 		echo "$$f" >> $(RTL_EXPORT_DIR)/filelist.f; \
 	done
-	@cd $(RTL_EXPORT_DIR) && zip -q ../$(RTL_ZIP) filelist.f *.sv
+	@cd $(RTL_EXPORT_DIR) && zip -q ../$(RTL_ZIP) filelist.f hello.hex *.sv
 	@echo "Exported: $(RTL_ZIP)"
-	@unzip -l $(RTL_ZIP) | grep '\.sv\|filelist'
+	@unzip -l $(RTL_ZIP) | grep '\.sv\|\.hex\|filelist'
 
 # Remove build artifacts
 clean:
