@@ -1,0 +1,201 @@
+-- ============================================================
+-- RV32I Reference Core in Tourbillon
+-- ============================================================
+-- An in-order, 4-stage pipeline: Fetch → Decode → Execute → Writeback
+-- Memory access via Memory(K → V) primitives desugared to req/resp queues.
+-- External functions (decode_rv32i, alu, etc.) are provided by rv32i_pkg.sv.
+
+-- ============================================================
+-- Type definitions
+-- ============================================================
+
+type Word   = Bits 32
+type Addr   = Bits 32
+type RegIdx = Bits 5
+
+enum MemOp = Load | Store | None
+
+record Decoded {
+    op      : Bits 4
+    rd      : RegIdx
+    rs1_val : Word
+    rs2_val : Word
+    imm     : Word
+    pc      : Addr
+    mem     : MemOp
+    wb      : Bool
+    is_br   : Bool
+    funct3  : Bits 3
+}
+
+-- ============================================================
+-- FETCH
+-- ============================================================
+-- Reads the PC, sends a read request to instruction memory,
+-- and forwards (pc, instruction) to the decode stage.
+-- Checks for redirects (branches) via try_take on the redirect queue.
+
+process Fetch {
+    consumes: redirect       : Queue(Addr)
+    produces: fetch_out      : Queue(Addr × Word)
+    consumes: imem_read_resp : Queue(Word)
+    produces: imem_read_req  : Queue(Addr)
+    produces: imem_write_req : Queue(Addr × Word)
+    state:    pc             : Cell(Addr, init = 0x8000_0000)
+
+    rule tick {
+        let current_pc = pc.take()
+        imem_read_req.put(current_pc)
+        let instr = imem_read_resp.take()
+        fetch_out.put((current_pc, instr))
+        match redirect.try_take() {
+            Some(target) => pc.put(target)
+            None         => pc.put(current_pc + 4)
+        }
+    }
+}
+
+-- ============================================================
+-- DECODE
+-- ============================================================
+-- Cracks the instruction word, reads register operands via peek
+-- on the register file, and produces a Decoded record.
+-- External function decode_rv32i provides the decode logic.
+
+process Decode {
+    consumes: fetch_in   : Queue(Addr × Word)
+    produces: decode_out : Queue(Decoded)
+    peeks:    regfile    : Cell(Array(32, Word))
+
+    rule crack {
+        let (pc, raw) = fetch_in.take()
+        match regfile.peek() {
+            Some(regs) => {
+                let rd      = decode_rd(raw)
+                let rs1     = decode_rs1(raw)
+                let rs2     = decode_rs2(raw)
+                let funct3  = decode_funct3(raw)
+                let funct7  = decode_funct7(raw)
+                let opcode  = raw & 0x7F
+                let alu_op  = decode_alu_op(opcode, funct3, funct7)
+                let imm     = decode_imm(raw, opcode)
+                let mem_op = decode_mem_op(opcode)
+                let needs_wb = decode_needs_wb(opcode)
+                let is_br = is_branch(opcode)
+                decode_out.put(Decoded {
+                    op      = alu_op,
+                    rd      = rd,
+                    rs1_val = regs[rs1],
+                    rs2_val = regs[rs2],
+                    imm     = imm,
+                    pc      = pc,
+                    mem     = mem_op,
+                    wb      = needs_wb,
+                    is_br   = is_br,
+                    funct3  = funct3
+                })
+            }
+            None => {
+                -- Regfile not ready; stall (rule won't fire since peek returns None)
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- EXECUTE
+-- ============================================================
+-- Performs ALU operations, handles loads/stores via dmem queues,
+-- and issues redirects for taken branches.
+
+process Execute {
+    consumes: exec_in        : Queue(Decoded)
+    produces: redirect       : Queue(Addr)
+    produces: writeback      : Queue(RegIdx × Word)
+    produces: dmem_read_req  : Queue(Addr)
+    consumes: dmem_read_resp : Queue(Word)
+    produces: dmem_write_req : Queue(Addr × Word)
+
+    rule go {
+        let d = exec_in.take()
+        let alu_out = alu(d.op, d.rs1_val, d.imm)
+
+        match d.mem {
+            Load => {
+                dmem_read_req.put(alu_out)
+                let val = dmem_read_resp.take()
+                if d.wb { writeback.put((d.rd, val)) }
+            }
+            Store => {
+                dmem_write_req.put((alu_out, d.rs2_val))
+            }
+            None => {
+                if d.wb { writeback.put((d.rd, alu_out)) }
+            }
+        }
+
+        if d.is_br && branch_taken(d.funct3, d.rs1_val, d.rs2_val) {
+            redirect.put(alu_out)
+        }
+    }
+}
+
+-- ============================================================
+-- WRITEBACK
+-- ============================================================
+-- Commits results to the register file.
+-- Ensures x0 is hardwired to zero.
+
+process Writeback {
+    consumes: wb_in   : Queue(RegIdx × Word)
+    state:    regfile : Cell(Array(32, Word), init = 0)
+
+    rule commit {
+        let (rd, val) = wb_in.take()
+        let regs = regfile.take()
+        -- x0 hardwired to zero: only write if rd != 0
+        -- Use update; the SV package ensures x0 stays zero
+        regfile.put(regs[rd := val])
+    }
+}
+
+-- ============================================================
+-- TOP-LEVEL PIPE
+-- ============================================================
+
+pipe CPU {
+    -- Inter-stage queues
+    let fetch_q  = Queue(Addr × Word, depth = 2)
+    let decode_q = Queue(Decoded, depth = 2)
+    let redir_q  = Queue(Addr, depth = 1)
+    let wb_q     = Queue(RegIdx × Word, depth = 2)
+
+    -- Memory interfaces (desugared to req/resp queues)
+    let imem = Memory(Addr -> Word, depth = 4096, latency = 1)
+    let dmem = Memory(Addr -> Word, depth = 4096, latency = 1)
+
+    -- Wire up the pipeline
+    Fetch {
+        fetch_out      = fetch_q,
+        redirect       = redir_q,
+        imem_read_req  = imem_read_req,
+        imem_read_resp = imem_read_resp,
+        imem_write_req = imem_write_req
+    }
+    Decode {
+        fetch_in   = fetch_q,
+        decode_out = decode_q,
+        regfile    = Writeback.regfile
+    }
+    Execute {
+        exec_in        = decode_q,
+        redirect       = redir_q,
+        writeback      = wb_q,
+        dmem_read_req  = dmem_read_req,
+        dmem_read_resp = dmem_read_resp,
+        dmem_write_req = dmem_write_req
+    }
+    Writeback {
+        wb_in = wb_q
+    }
+}

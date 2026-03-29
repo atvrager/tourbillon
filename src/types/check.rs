@@ -4,6 +4,18 @@ use crate::diagnostics::Diagnostic;
 use super::env::TypeEnv;
 use super::ty::Ty;
 
+/// Check if a type contains Ty::Error anywhere (preventing cascading errors).
+fn contains_error(ty: &Ty) -> bool {
+    match ty {
+        Ty::Error => true,
+        Ty::Tuple(tys) => tys.iter().any(contains_error),
+        Ty::Record { fields, .. } => fields.iter().any(|(_, t)| contains_error(t)),
+        Ty::Option(inner) => contains_error(inner),
+        Ty::Array { elem, .. } => contains_error(elem),
+        _ => false,
+    }
+}
+
 /// Infer the type of an expression.
 pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Diagnostic>) -> Ty {
     match &expr.node {
@@ -107,7 +119,7 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
                 | BinOp::Shl
                 | BinOp::Shr => {
                     // Arithmetic/bitwise: both operands same type, result same type
-                    if lty != Ty::Error && rty != Ty::Error && lty != rty {
+                    if !contains_error(&lty) && !contains_error(&rty) && lty != rty {
                         diagnostics.push(Diagnostic::error(
                             expr.span.clone(),
                             format!("type mismatch: `{lty}` vs `{rty}`"),
@@ -117,7 +129,7 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
                 }
                 BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                     // Comparison: both operands same type, result Bool
-                    if lty != Ty::Error && rty != Ty::Error && lty != rty {
+                    if !contains_error(&lty) && !contains_error(&rty) && lty != rty {
                         diagnostics.push(Diagnostic::error(
                             expr.span.clone(),
                             format!("type mismatch in comparison: `{lty}` vs `{rty}`"),
@@ -307,8 +319,8 @@ pub fn check_stmt(stmt: &Spanned<Stmt>, env: &mut TypeEnv, diagnostics: &mut Vec
                     }
                 };
                 if let Some(expected) = expected
-                    && val_ty != Ty::Error
-                    && expected != Ty::Error
+                    && !contains_error(&val_ty)
+                    && !contains_error(&expected)
                     && val_ty != expected
                 {
                     diagnostics.push(Diagnostic::error(

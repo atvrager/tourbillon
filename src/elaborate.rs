@@ -215,7 +215,68 @@ fn elaborate_pipe(
         }
     }
 
-    // Wire bindings: iterate instances and their port bindings
+    // Phase 3a: Create implicit self-loop edges for all state ports first
+    // (needed so dotted references like Writeback.regfile resolve correctly)
+    for (idx, inst) in pipe.instances.iter().enumerate() {
+        let proc_name = &inst.process_name.node;
+        let instance_name = find_instance_name(&instances, proc_name, idx);
+        let Some(instance_name) = instance_name else {
+            continue;
+        };
+        let node_idx = instances[&instance_name];
+
+        let Some(proc_def) = processes.get(proc_name) else {
+            continue;
+        };
+
+        // Collect explicitly bound port names from this instance
+        let explicit_bindings: HashMap<String, bool> = inst
+            .bindings
+            .iter()
+            .map(|b| (b.port.node.clone(), true))
+            .collect();
+
+        for port_def in &proc_def.ports {
+            if port_def.kind == PortKind::State
+                && !explicit_bindings.contains_key(&port_def.name.node)
+            {
+                let port_ty = type_env.resolve_type_expr(&port_def.ty.node, diagnostics);
+                let elem_ty = port_element_type(&port_ty).unwrap_or(port_ty.clone());
+
+                let self_loop_name = format!("{instance_name}.{}", port_def.name.node);
+                let init = extract_init_value(&port_def.ty.node);
+                let edge = QueueEdge {
+                    name: self_loop_name.clone(),
+                    elem_ty,
+                    depth: 1,
+                    kind: QueueEdgeKind::Cell {
+                        peeker_instances: vec![],
+                        init,
+                    },
+                    span: port_def.name.span.clone(),
+                };
+
+                let edge_idx = graph.add_edge(node_idx, node_idx, edge);
+                pending_edges.insert(
+                    self_loop_name,
+                    PendingEdge {
+                        edge_idx,
+                        writer: Some((instance_name.clone(), port_def.name.span.clone())),
+                        reader: Some((instance_name.clone(), port_def.name.span.clone())),
+                        decl_span: port_def.name.span.clone(),
+                    },
+                );
+
+                // Bind port
+                let node = &mut graph[node_idx];
+                if let Some(rp) = node.ports.iter_mut().find(|p| p.name == port_def.name.node) {
+                    rp.bound_to = Some(edge_idx);
+                }
+            }
+        }
+    }
+
+    // Phase 3b: Wire bindings — iterate instances and their port bindings
     for (idx, inst) in pipe.instances.iter().enumerate() {
         let proc_name = &inst.process_name.node;
         let instance_name = find_instance_name(&instances, proc_name, idx);
@@ -399,43 +460,7 @@ fn elaborate_pipe(
             }
         }
 
-        // Implicit self-loops for unbound state: ports
-        for port_def in &proc_def.ports {
-            if port_def.kind == PortKind::State && !bound_ports.contains_key(&port_def.name.node) {
-                let port_ty = type_env.resolve_type_expr(&port_def.ty.node, diagnostics);
-                let elem_ty = port_element_type(&port_ty).unwrap_or(port_ty.clone());
-
-                let self_loop_name = format!("{instance_name}.{}", port_def.name.node);
-                let init = extract_init_value(&port_def.ty.node);
-                let edge = QueueEdge {
-                    name: self_loop_name.clone(),
-                    elem_ty,
-                    depth: 1,
-                    kind: QueueEdgeKind::Cell {
-                        peeker_instances: vec![],
-                        init,
-                    },
-                    span: port_def.name.span.clone(),
-                };
-
-                let edge_idx = graph.add_edge(node_idx, node_idx, edge);
-                pending_edges.insert(
-                    self_loop_name,
-                    PendingEdge {
-                        edge_idx,
-                        writer: Some((instance_name.clone(), port_def.name.span.clone())),
-                        reader: Some((instance_name.clone(), port_def.name.span.clone())),
-                        decl_span: port_def.name.span.clone(),
-                    },
-                );
-
-                // Bind port
-                let node = &mut graph[node_idx];
-                if let Some(rp) = node.ports.iter_mut().find(|p| p.name == port_def.name.node) {
-                    rp.bound_to = Some(edge_idx);
-                }
-            }
-        }
+        // (Implicit self-loops already created in Phase 3a above)
     }
 
     // Phase 4: Validate

@@ -92,6 +92,12 @@ where
             args: vec![],
         });
 
+        // Integer literals as type expressions (e.g. 32 in Array(32, Word))
+        let int_as_type = select! { Token::Int(n) => n }.map(|n| TypeExpr::Named {
+            name: format!("{n}"),
+            args: vec![],
+        });
+
         let paren_type = type_expr
             .clone()
             .delimited_by(just(Token::LParen), just(Token::RParen))
@@ -103,6 +109,7 @@ where
             paren_type,
             named_with_parens,
             named_with_int,
+            int_as_type,
             named_bare,
         ))
         .map_with(|node, e| spn(node, e.span()));
