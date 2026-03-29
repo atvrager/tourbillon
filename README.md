@@ -28,30 +28,43 @@ Named after the legendary Breguet No. 1160 pocket watch — the most ambitious t
 
 ```
        cpu domain              xbar domain             dev domain
-  ┌─────────────────┐     ┌────────────────┐     ┌────────────────┐
-  │   CPUCore pipe   │     │                │     │                │
-  │  (RV32I 4-stage) │ CDC │   Xbar 1→2    │ CDC │  MemDevice     │
-  │                  ├─────┤  (addr decode) ├─────┤  UartDevice    │
-  │  imem (local)    │     │                │     │  (DPI uart_tx) │
-  └─────────────────┘     └────────────────┘     └────────────────┘
+  ┌─────────────────┐     ┌────────────────┐     ┌──────────────────┐
+  │   CPUCore pipe   │     │                │     │                  │
+  │  (RV32I 4-stage) │ CDC │   Xbar 1→2    │ CDC │  MemDevice       │
+  │                  ├─────┤  (addr decode) ├─────┤  UartPhy pipe    │
+  │  imem (local)    │     │                │     │   TX/RX/RTS/CTS  │
+  └─────────────────┘     └────────────────┘     └───────┬──────────┘
+                                                         │ external Queue pins
+                                                    uart_tx  uart_rx
 ```
 
-- **3 clock domains** with gray-code async FIFO CDC
+- **3 clock domains** (100/150/50 MHz in FPGA) with gray-code async FIFO CDC
 - **Pipe hierarchy**: CPUCore pipe instantiated inside Marie with cross-pipe queue wiring
 - **Address-decoded crossbar**: `addr[31:28]` routes to memory (0x8xxx) or UART (0x1xxx)
-- **DPI UART**: `external fn uart_tx(ch : Bits 8)` prints via Verilator DPI-C
+- **Real UART**: UartTx/UartRx/UartDevice written entirely in Tourbillon — bit-serial shift registers at 3 MBaud, with CTS flow control. No DPI — physical TX/RX/RTS/CTS pins via `external Queue`
 - **Non-speculative pipeline**: no branch prediction — Execute sends correct next PC after full completion
 - **Split-phase bus fabric**: all processes use `try_take` polling for CDC-tolerant multi-cycle operations
 
-### Running Hello World
+### Running Hello World (Verilator)
 
 ```bash
-# Requires: verilator, riscv64-elf-gcc (or riscv64-unknown-elf-gcc)
-make -C sim soc-build                         # Compile SoC → Verilator sim (~8s)
-make -C sim RISCV_PREFIX=riscv64-elf- soc-hello   # "Hello, World!" via UART
+# Requires: verilator, riscv64-elf-as/ld/objcopy
+make -C sim soc-hello   # "Hello, World!" via UART TX pin → DPI deserializer
 ```
 
-Output: `Hello, World!` printed through the full 3-domain bus fabric, PASS after 736 cycles.
+Output: `Hello, World!` printed through 3-domain bus fabric + bit-serial UART.
+
+### FPGA Export (Xilinx Virtex UltraScale+)
+
+```bash
+make -C sim rtl-export   # → marie_soc_rtl.zip (standalone, hello.hex baked in)
+```
+
+Unzip into Vivado, set `marie_top` as top (`STANDALONE=1`), add your board XDC, synthesize. UART TX prints "Hello, World!" on first boot at 3 MBaud.
+
+Two export modes:
+- `rtl-export` / `rtl-export-standalone` — internal BRAM with hello.hex, just add constraints
+- `rtl-export-ext` — external memory ports, wire your own SRAM controller
 
 ## RV32I Reference Core
 
@@ -111,6 +124,7 @@ pipe Top {
 - **Pipe** — structural composition with hierarchy and cross-pipe wiring
 - **Memory(K → V)** — addressable storage, desugars to req/resp queues
 - **AsyncQueue(T, depth=N)** — clock domain crossing FIFO (gray-code)
+- **external Queue** — module port pins (no FIFO, for physical I/O)
 - **const** — compile-time integer constants (→ `localparam`)
 - **expr[hi:lo]** — bit slicing with inferred result width
 - **external fn** — DPI function declarations (→ `import "DPI-C"`)
@@ -130,20 +144,20 @@ tbn clean                       # Remove build cache
 
 ```
 src/           Rust compiler (parse → desugar → typecheck → elaborate → schedule → lower)
-  wave.rs        FST waveform trace reader
 examples/      Tourbillon source files
-  rv32i.tbn      RV32I reference core (direct-wired, speculative)
-  marie.tbn      Marie Antoinette SoC (3-domain, non-speculative, bus fabric)
+  rv32i.tbn      RV32I reference core
+  marie.tbn      Marie Antoinette SoC (3-domain, UART, bus fabric)
 sim/           Verilator simulation infrastructure
   rv32i_pkg.sv   RV32I decode/ALU/branch support package
   mem_model.sv   Behavioral SRAM model
-  tb_top.sv      Direct-wired CPU simulation top-level
-  tb_cpu.cpp     Single-clock C++ testbench with ELF loader
-  soc_top.sv     Marie SoC multi-clock simulation wrapper
-  soc_tb.cpp     3-domain C++ testbench with UART DPI
+  soc_top.sv     SoC simulation wrapper (UART DPI bridge, multi-rate clocks)
+  soc_tb.cpp     3-domain C++ testbench (100/150/50 MHz)
+  Makefile       Build system (soc-hello, riscv-tests, rtl-export, rtl-check)
   tests/         Assembly tests (smoke.hex, hello.S)
+rtl/           FPGA synthesis files
+  marie_top.sv   Xilinx VU+ toplevel (MMCME4, rst_sync, STANDALONE param)
+  fpga_mem.sv    Synthesisable memory (distributed RAM / block RAM)
 tests/         Rust integration tests
-riscv-tests/   RISC-V compliance test suite (git submodule)
 ```
 
 ## License

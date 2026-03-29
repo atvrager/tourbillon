@@ -255,7 +255,33 @@ external fn read_sensor() -> Bits 16
 
 The compiler registers the signature for call-site type checking and emits `import "DPI-C" function ...` in the generated SV preamble. Type mapping: `Bits 8` → `byte unsigned`, `Bits 32` → `int unsigned`, `Bool` → `bit`.
 
-### 2.9 Pipe Hierarchy
+### 2.9 External Queues (Physical Pins)
+
+Queues declared with the `external` keyword become module ports rather than internal FIFOs:
+
+```
+let tx_pin = external Queue(Bits 1, depth = 1)
+```
+
+The compiler skips FIFO instantiation and exposes the queue's enq/deq signals as top-level ports. Direction is inferred from port bindings: if an internal process writes (`produces:`) to the queue, the enq side (valid, data out; ready in) becomes the module port. If an internal process reads (`consumes:`), the deq side is exposed.
+
+External queues work through pipe hierarchy — a child pipe's external queues bubble up as the parent module's ports. This is the mechanism for physical pin interfaces:
+
+```
+pipe UartPhy {
+    let tx_pin  = external Queue(Bits 1, depth = 1)
+    let rx_pin  = external Queue(Bits 1, depth = 1)
+    let rts_pin = external Queue(Bits 1, depth = 1)
+    let cts_pin = external Queue(Bits 1, depth = 1)
+
+    UartTx { tx_data = tx_q, tx_pin = tx_pin, cts_pin = cts_pin }
+    UartRx { rx_data = rx_q, rx_pin = rx_pin, rts_pin = rts_pin }
+}
+```
+
+The FPGA toplevel wires these directly to pads. The Verilator testbench wires them to a DPI deserializer.
+
+### 2.10 Pipe Hierarchy
 
 Pipes can instantiate other pipes, enabling modular composition:
 
@@ -274,18 +300,20 @@ pipe SoC {
 
 The child pipe's process network is recursively elaborated and merged into the parent's graph. Queue bindings in the instantiation perform **cross-pipe queue wiring**: the child's internal queue is replaced by the parent's queue. Queues with no reader or writer in the child become **pipe ports** — the missing endpoint is provided by the parent. Dead (unreferenced) edges from substituted child queues are pruned from the graph.
 
-### 2.10 The Marie Antoinette SoC
+### 2.12 The Marie Antoinette SoC
 
 `examples/marie.tbn` — a multi-clock-domain SoC that exercises every language feature:
 
-- **3 clock domains**: cpu, xbar, dev — with AsyncQueue CDC FIFOs
+- **3 clock domains**: cpu (100 MHz), xbar (150 MHz), dev (50 MHz) — with AsyncQueue CDC FIFOs
 - **RV32I CPU** via pipe hierarchy (`CPUCore` pipe with exposed dmem ports)
-- **Bus fabric**: CpuDmemAdapter → Xbar (1→2 address-decoded router) → MemDevice + UartDevice
+- **Bus fabric**: CpuDmemAdapter → Xbar (1→2 address-decoded router) → MemDevice + UartPhy
 - **Non-speculative pipeline**: next_pc queue replaces branch prediction; Execute always sends correct next PC after full instruction completion
 - **Split-phase processes**: all bus fabric processes use `try_take` polling for CDC-tolerant multi-cycle operations
-- **DPI UART**: `external fn uart_tx(ch : Bits 8)` prints characters via Verilator DPI
+- **Physical UART**: UartTx (shift register serializer), UartRx (phase-based deserializer), UartDevice (bus register map), UartPhy pipe — all Tourbillon, no DPI. 3 MBaud, CTS flow control. TX/RX/RTS/CTS exposed as `external Queue` pins.
 
-Simulation: `make -C sim soc-hello` prints "Hello, World!" through the full bus fabric.
+Simulation: `make -C sim soc-hello` prints "Hello, World!" through the full bus fabric and bit-serial UART.
+
+FPGA: `make -C sim rtl-export` produces a Vivado-ready zip with hello.hex baked into BRAM. Xilinx VU+ toplevel with MMCME4 clock generation and per-domain reset synchronisation.
 
 ---
 

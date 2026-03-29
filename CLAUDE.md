@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Marie Antoinette SoC complete — Hello World prints via UART through 3-clock-domain bus fabric. Phase 0–3 complete. rv32ui compliance: 38/38 tests pass. Compiler features: `const` (localparam), `expr[hi:lo]` (bit slicing), `external fn` (DPI), pipe hierarchy with cross-pipe queue wiring, `tbn wave` (FST trace reader). CDC: AsyncQueue gray-code FIFO, domain annotations, cross-domain validation. Split-phase processes for CDC-tolerant bus fabric. Conditional put/take guard analysis (can_fire only requires unconditional operations). `TOURBILLON.md` is the authoritative specification.
+**Status:** Marie Antoinette SoC complete — Hello World prints via physical UART TX pin through 3-clock-domain bus fabric. Phase 0–3 complete. rv32ui compliance: 38/38 tests pass. Compiler features: `const` (localparam), `expr[hi:lo]` (bit slicing), `external fn` (DPI), `external Queue` (module port pins), pipe hierarchy with cross-pipe queue wiring, `tbn wave` (FST trace reader), width-aware SV emission. CDC: AsyncQueue gray-code FIFO, domain annotations, cross-domain validation. Split-phase processes for CDC-tolerant bus fabric. Conditional put/take guard analysis (can_fire only requires unconditional operations). UART: real bit-serial TX/RX/RTS/CTS in Tourbillon (UartTx, UartRx, UartDevice, UartPhy pipe). FPGA: Xilinx VU+ toplevel with MMCME4 clkgen (100/150/50 MHz), rst_sync, standalone BRAM mode. `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -58,6 +58,7 @@ Tourbillon has exactly three constructs:
 - **Constants** — `const NAME = value`. Named compile-time integer constants. Emitted as `localparam` in SV, inlined as literal values in expressions.
 - **Bit slicing** — `expr[hi:lo]`. Extract bits from a `Bits N` value. Result type is `Bits(hi - lo + 1)`. Parser disambiguates from array index via `[int:int]` look-ahead.
 - **External functions** — `external fn name(params) [-> RetTy]`. DPI function declarations. Emitted as `import "DPI-C"` in SV. Call-site type checking against registered signatures.
+- **External queues** — `let pin = external Queue(Bits 1, depth = 1)`. Queue becomes a module port (no FIFO instantiated). Direction inferred from port bindings. Works through pipe hierarchy. Used for physical pin interfaces (UART TX/RX/RTS/CTS).
 - **Pipe hierarchy** — Pipes can instantiate other pipes. Child pipe's process network is recursively elaborated and merged into parent. Cross-pipe queue wiring via bindings. Dangling queue endpoints become pipe ports.
 
 ### Compiler Pipeline (8 stages)
@@ -135,6 +136,7 @@ tests/
   constants.rs       -- Const declaration tests
   bit_slice.rs       -- Bit slice expression tests
   external_fn.rs     -- External function / DPI tests
+  external_queue.rs  -- External queue / module port pin tests
   pipe_hierarchy.rs  -- Pipe-in-pipe instantiation + cross-pipe wiring tests
   riscv_tests.rs     -- rv32ui compliance: build sim + run 38 tests via Verilator
 examples/
@@ -151,14 +153,19 @@ sim/
   mem_model.sv       -- Behavioral SRAM with ready/valid interface (combinational read, verilator public)
   tb_top.sv          -- Verilator simulation top-level: CPU + memory models + tohost monitor
   tb_cpu.cpp         -- Verilator C++ testbench driver with ELF loader and FST trace
-  soc_top.sv         -- Multi-clock SoC testbench wrapper: Marie + memory models
-  soc_tb.cpp         -- 3-domain Verilator driver with ELF loader + UART DPI
-  Makefile           -- Simulation build system (sv, build, test-hex, riscv-tests, soc-*)
+  soc_top.sv         -- Multi-clock SoC testbench wrapper: Marie + memory models + UART DPI bridge
+  soc_tb.cpp         -- 3-domain Verilator driver with ELF loader, multi-rate clocks (100/150/50 MHz)
+  Makefile           -- Simulation build system (sv, build, test-hex, riscv-tests, soc-*, rtl-export)
+  verilog2hex.py     -- Convert objcopy Verilog hex to $readmemh format (rebase addresses)
   env/p/riscv_test.h -- Custom no-CSR riscv-tests environment for Tourbillon CPU
   build_tests.sh     -- Builds rv32ui tests from riscv-tests submodule with custom env
   tests/smoke.S      -- Minimal RV32I smoke test assembly
   tests/smoke.hex    -- Hand-encoded smoke test (hex, no toolchain needed)
-  tests/hello.S      -- "Hello, World!" SoC test (UART DPI output)
+  tests/hello.S      -- "Hello, World!" SoC test (UART TX at 3 MBaud)
+rtl/
+  marie_top.sv       -- Xilinx VU+ FPGA toplevel: MMCME4 clkgen, rst_sync, STANDALONE param
+  fpga_mem.sv        -- Synthesisable memory: distributed RAM (imem) or block RAM (dmem)
+  xilinx_stubs.sv    -- IBUFDS/MMCME4_ADV/BUFGCE stubs for Verilator lint
 ```
 
 ### Provenance System
