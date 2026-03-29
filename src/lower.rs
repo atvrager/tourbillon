@@ -1490,8 +1490,10 @@ impl<'a> SvEmitter<'a> {
             Pattern::Tuple(sub_pats) => {
                 // Destructure by bit-slicing the concatenated value.
                 // In SV, {a, b} has `a` in the MSB and `b` in the LSB.
+                //
                 if let Ty::Tuple(elem_tys) = val_ty {
                     let total_width: u64 = elem_tys.iter().map(bit_width).sum();
+                    let base = val_sv;
                     let mut bit_offset = 0u64; // from LSB
                     // Process elements in reverse (last element = LSB)
                     let elems: Vec<_> = sub_pats.iter().zip(elem_tys.iter()).collect();
@@ -1499,11 +1501,11 @@ impl<'a> SvEmitter<'a> {
                     for (i, (_pat, ety)) in elems.iter().enumerate().rev() {
                         let w = bit_width(ety);
                         let sv_slice = if total_width == w && elems.len() == 1 {
-                            val_sv.to_string()
+                            base.to_string()
                         } else if w == 1 {
-                            format!("{val_sv}[{bit_offset}]")
+                            format!("{base}[{bit_offset}]")
                         } else {
-                            format!("{val_sv}[{}:{}]", bit_offset + w - 1, bit_offset)
+                            format!("{base}[{}:{}]", bit_offset + w - 1, bit_offset)
                         };
                         slices.push((i, sv_slice, (*ety).clone()));
                         bit_offset += w;
@@ -1574,14 +1576,41 @@ impl<'a> SvEmitter<'a> {
                     };
                     match name.as_str() {
                         "Some" => {
-                            // Bind the inner value (lower bits)
+                            // Bind the inner value (lower bits of Option encoding).
+                            // For tuple inner types, bind each element directly from
+                            // the scrutinee to avoid chained bit-slices.
                             if fields.len() == 1 {
-                                let data_sv = if inner_w == 1 {
-                                    format!("{scrut_sv}[0]")
+                                if let Ty::Tuple(ref elem_tys) = **inner_ty
+                                    && let Pattern::Tuple(ref sub_pats) = fields[0].node
+                                    && sub_pats.len() == elem_tys.len()
+                                {
+                                    // Direct tuple destructuring from Option bits
+                                    let mut bit_off = 0u64;
+                                    let elems: Vec<_> =
+                                        sub_pats.iter().zip(elem_tys.iter()).collect();
+                                    let mut slices: Vec<(usize, String, Ty)> = vec![];
+                                    for (i, (_p, ety)) in elems.iter().enumerate().rev() {
+                                        let w = bit_width(ety);
+                                        let sv = if w == 1 {
+                                            format!("{scrut_sv}[{bit_off}]")
+                                        } else {
+                                            format!("{scrut_sv}[{}:{}]", bit_off + w - 1, bit_off)
+                                        };
+                                        slices.push((i, sv, (*ety).clone()));
+                                        bit_off += w;
+                                    }
+                                    slices.sort_by_key(|(i, _, _)| *i);
+                                    for (i, sv, ety) in slices {
+                                        self.bind_pattern(&sub_pats[i].node, &sv, &ety, ctx);
+                                    }
                                 } else {
-                                    format!("{scrut_sv}[{}:0]", inner_w - 1)
-                                };
-                                self.bind_pattern(&fields[0].node, &data_sv, inner_ty, ctx);
+                                    let data_sv = if inner_w == 1 {
+                                        format!("{scrut_sv}[0]")
+                                    } else {
+                                        format!("{scrut_sv}[{}:0]", inner_w - 1)
+                                    };
+                                    self.bind_pattern(&fields[0].node, &data_sv, inner_ty, ctx);
+                                }
                             }
                             return valid_bit;
                         }

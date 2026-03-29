@@ -10,6 +10,7 @@ pub mod parse;
 pub mod provenance;
 pub mod schedule;
 pub mod types;
+pub mod wave;
 
 use diagnostics::{Errors, report_errors};
 

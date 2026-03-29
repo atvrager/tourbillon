@@ -39,6 +39,24 @@ enum Command {
     },
     /// Remove the build cache (~/.tbn/store/)
     Clean,
+    /// Read an FST waveform trace and dump signal values
+    Wave {
+        /// Input .fst file
+        #[arg(required = true)]
+        file: PathBuf,
+        /// Signal path filter (substring match, e.g. "tohost" or "cpu_clk")
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// Only show values at or after this timestamp
+        #[arg(long)]
+        from: Option<u64>,
+        /// Only show values at or before this timestamp
+        #[arg(long)]
+        to: Option<u64>,
+        /// List all signal names without reading values
+        #[arg(short, long)]
+        list: bool,
+    },
 }
 
 fn main() {
@@ -153,6 +171,18 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+            }
+        }
+        Command::Wave {
+            file,
+            filter,
+            from,
+            to,
+            list,
+        } => {
+            if let Err(e) = tbn::wave::run(&file, filter.as_deref(), from, to, list) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
             }
         }
         Command::Clean => {

@@ -129,6 +129,17 @@ module soc_top (
     );
 
     // -------------------------------------------------------------------------
+    // Memory loading via +memfile= plusarg (hex files)
+    // -------------------------------------------------------------------------
+    string memfile;
+    initial begin
+        if ($value$plusargs("memfile=%s", memfile)) begin
+            $readmemh(memfile, imem.storage);
+            $readmemh(memfile, dmem.storage);
+        end
+    end
+
+    // -------------------------------------------------------------------------
     // tohost monitor — watch dev_mem writes to 0x80001000
     // -------------------------------------------------------------------------
     localparam [31:0] TOHOST_ADDR = 32'h8000_1000;
