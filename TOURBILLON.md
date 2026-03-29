@@ -598,11 +598,11 @@ tbn init <name>                 Scaffold a new Tourbillon project
 | **2.0e** | Array functional update expression (`regs[rd := val]`) | **Complete** |
 | **2.0f** | `try_take()` deq_ready wiring (assert when rule fires & data valid) | **Complete** |
 | **2.0g** | `Memory(K → V, depth, latency)` primitive: parse, desugar, elaborate, lower | **Complete** |
-| **2.1a** | RV32I `.tbn` source (`examples/rv32i.tbn`) | Planned |
-| **2.1b** | Hand-written RV32I SV support package (`sim/rv32i_pkg.sv`) | Planned |
-| **2.1c** | Simulation top-level with memory models (`sim/tb_top.sv`) | Planned |
-| **2.2** | Verilator infrastructure: C++ testbench, Makefile | Planned |
-| **2.3** | First instruction execution — smoke test passes under Verilator | Planned |
+| **2.1a** | RV32I `.tbn` source (`examples/rv32i.tbn`) | **Complete** — `tbn check` + `tbn build` pass |
+| **2.1b** | Hand-written RV32I SV support package (`sim/rv32i_pkg.sv`) | **Complete** |
+| **2.1c** | Simulation top-level with memory models (`sim/tb_top.sv`) | **Complete** |
+| **2.2** | Verilator infrastructure: C++ testbench, Makefile | **Complete** |
+| **2.3** | First instruction execution — smoke test passes under Verilator | **In progress** — Verilator build succeeds, memory backing needed |
 | **2.4** | riscv-tests rv32ui compliance (39 tests), verified against Spike | Planned |
 | **2.5** | Golden SV tests, CI integration, documentation updates | Planned |
 

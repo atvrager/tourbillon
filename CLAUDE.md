@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0 complete. Phase 1 complete: parse → desugar → type-check → elaborate → schedule → lower → provenance. `tbn build` produces provenance-tagged SystemVerilog with BLAKE3 source hashing. `TOURBILLON.md` is the authoritative specification.
+**Status:** Phase 0 complete. Phase 1 complete. Phase 2 in progress: lowerer completeness done (struct packed, enum, tuple destruct, variant match, array update, try_take wiring, Memory primitive); RV32I `.tbn` design compiles to Verilator-clean SV. `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -118,6 +118,19 @@ tests/
   schedule.rs        -- Schedule integration tests
   lower.rs           -- Lowering / SV codegen integration tests
   provenance.rs      -- Provenance hashing and embedding tests
+examples/
+  rv32i.tbn          -- RV32I reference core (4-stage pipeline)
+  counter.tbn        -- Simple counter (Cell + take/put)
+  producer_consumer.tbn -- Queue producer/consumer
+  branch.tbn         -- Conditional routing
+  peek.tbn           -- Cross-instance Cell peek
+  priority.tbn       -- Multi-rule priority suppression
+sim/
+  rv32i_pkg.sv       -- Hand-written RV32I decode/ALU/branch SV package
+  tb_top.sv          -- Verilator simulation top-level wrapper
+  tb_cpu.cpp         -- Verilator C++ testbench driver
+  Makefile           -- Simulation build system
+  tests/smoke.S      -- Minimal RV32I smoke test assembly
 ```
 
 ### Provenance System
