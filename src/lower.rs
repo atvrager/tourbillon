@@ -238,6 +238,25 @@ fn dpi_type_str(ty: &Ty) -> String {
     }
 }
 
+/// Extract the data portion from a try_take scrutinee expression.
+/// try_take emits `{q_foo_deq_valid, q_foo_deq_data}`.
+/// For the Some(x) binding, we want just `q_foo_deq_data`.
+fn extract_try_take_data(scrut_sv: &str, inner_w: u64) -> String {
+    // If scrut_sv matches `{X, Y}`, extract Y (the data part)
+    if let Some(inner) = scrut_sv.strip_prefix('{')
+        && let Some(inner) = inner.strip_suffix('}')
+        && let Some(comma_pos) = inner.find(", ")
+    {
+        return inner[comma_pos + 2..].to_string();
+    }
+    // Fallback: bit-slice
+    if inner_w == 1 {
+        format!("{scrut_sv}[0]")
+    } else {
+        format!("{scrut_sv}[{}:0]", inner_w - 1)
+    }
+}
+
 fn binop_sv(op: &BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
@@ -1604,11 +1623,10 @@ impl<'a> SvEmitter<'a> {
                                         self.bind_pattern(&sub_pats[i].node, &sv, &ety, ctx);
                                     }
                                 } else {
-                                    let data_sv = if inner_w == 1 {
-                                        format!("{scrut_sv}[0]")
-                                    } else {
-                                        format!("{scrut_sv}[{}:0]", inner_w - 1)
-                                    };
+                                    // For try_take, scrut_sv is {deq_valid, deq_data}.
+                                    // Extract just the deq_data signal by stripping
+                                    // the {valid, ...} wrapper if present.
+                                    let data_sv = extract_try_take_data(scrut_sv, inner_w);
                                     self.bind_pattern(&fields[0].node, &data_sv, inner_ty, ctx);
                                 }
                             }

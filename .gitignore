@@ -36,3 +36,4 @@ sim/tests/rv32ui/
 sim/tests/*.bin
 sim/tests/*.o
 sim/tests/*.elf
+*.fst

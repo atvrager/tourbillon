@@ -162,33 +162,39 @@ process Execute {
     rule tick {
         let s = stash.take()
         if s.phase == 0 {
-            let d = exec_in.take()
-            let result = compute_result(d.op, d.opcode, d.rs1_val, d.rs2_val, d.imm, d.pc)
+            match exec_in.try_take() {
+                Some(d) => {
+                    let result = compute_result(d.op, d.opcode, d.rs1_val, d.rs2_val, d.imm, d.pc)
 
-            if d.is_br && is_taken(d.opcode, d.funct3, d.rs1_val, d.rs2_val) {
-                redirect.put(compute_branch_target(d.opcode, d.pc, d.rs1_val, d.imm))
-            }
+                    if d.is_br && is_taken(d.opcode, d.funct3, d.rs1_val, d.rs2_val) {
+                        redirect.put(compute_branch_target(d.opcode, d.pc, d.rs1_val, d.imm))
+                    }
 
-            match d.mem {
-                Load => {
-                    dmem_read_req.put(result)
-                    stash.put(ExecStash {
-                        phase = 1, rd = d.rd, funct3 = d.funct3,
-                        rs2_val = d.rs2_val, result = result
-                    })
-                }
-                Store => {
-                    dmem_read_req.put(result)
-                    stash.put(ExecStash {
-                        phase = 2, rd = d.rd, funct3 = d.funct3,
-                        rs2_val = d.rs2_val, result = result
-                    })
+                    match d.mem {
+                        Load => {
+                            dmem_read_req.put(result)
+                            stash.put(ExecStash {
+                                phase = 1, rd = d.rd, funct3 = d.funct3,
+                                rs2_val = d.rs2_val, result = result
+                            })
+                        }
+                        Store => {
+                            dmem_read_req.put(result)
+                            stash.put(ExecStash {
+                                phase = 2, rd = d.rd, funct3 = d.funct3,
+                                rs2_val = d.rs2_val, result = result
+                            })
+                        }
+                        None => {
+                            writeback.put((d.wb, d.rd, result))
+                            stash.put(ExecStash {
+                                phase = 0, rd = 0, funct3 = 0, rs2_val = 0, result = 0
+                            })
+                        }
+                    }
                 }
                 None => {
-                    writeback.put((d.wb, d.rd, result))
-                    stash.put(ExecStash {
-                        phase = 0, rd = 0, funct3 = 0, rs2_val = 0, result = 0
-                    })
+                    stash.put(s)
                 }
             }
         } else {
@@ -364,19 +370,23 @@ process Xbar {
     rule tick {
         let p = xphase.take()
         if p == 0 {
-            let req = host_req.take()
-            let region = req.addr[31:28]
-            if region == MEM_REGION {
-                dev0_req.put(req)
-                xphase.put(1)
-            } else {
-                if region == UART_REGION {
-                    dev1_req.put(req)
-                    xphase.put(2)
-                } else {
-                    host_resp.put(0)
-                    xphase.put(0)
+            match host_req.try_take() {
+                Some(req) => {
+                    let region = req.addr[31:28]
+                    if region == MEM_REGION {
+                        dev0_req.put(req)
+                        xphase.put(1)
+                    } else {
+                        if region == UART_REGION {
+                            dev1_req.put(req)
+                            xphase.put(2)
+                        } else {
+                            host_resp.put(0)
+                            xphase.put(0)
+                        }
+                    }
                 }
+                None => { xphase.put(0) }
             }
         } else {
             if p == 1 {
@@ -416,14 +426,18 @@ process MemDevice {
     rule tick {
         let p = mphase.take()
         if p == 0 {
-            let r = req.take()
-            if r.we {
-                mem_wr_req.put((r.addr, r.data))
-                resp.put(0)
-                mphase.put(0)
-            } else {
-                mem_rd_req.put(r.addr)
-                mphase.put(1)
+            match req.try_take() {
+                Some(r) => {
+                    if r.we {
+                        mem_wr_req.put((r.addr, r.data))
+                        resp.put(0)
+                        mphase.put(0)
+                    } else {
+                        mem_rd_req.put(r.addr)
+                        mphase.put(1)
+                    }
+                }
+                None => { mphase.put(0) }
             }
         } else {
             match mem_rd_resp.try_take() {
