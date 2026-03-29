@@ -14,6 +14,10 @@ pub struct ProcessNetwork {
     pub instances: HashMap<String, NodeIndex>,
     /// Type definitions reachable from this network (records, enums).
     pub type_defs: HashMap<String, Ty>,
+    /// Declared clock domain names (empty = single-domain, backward compatible).
+    pub domains: Vec<String>,
+    /// Instance name → domain name (None = default domain using clk/rst_n).
+    pub domain_map: HashMap<String, Option<String>>,
 }
 
 /// A process instance node in the graph.
@@ -48,7 +52,7 @@ pub struct QueueEdge {
     pub span: Span,
 }
 
-/// Whether an edge is a regular queue or a cell (with possible cross-instance peekers).
+/// Whether an edge is a regular queue, a cell, or an async queue (CDC FIFO).
 #[derive(Debug, Clone)]
 pub enum QueueEdgeKind {
     Queue {
@@ -59,4 +63,6 @@ pub enum QueueEdgeKind {
         peeker_instances: Vec<String>,
         init: Option<u64>,
     },
+    /// Async FIFO for clock domain crossing. No init tokens, no peekers.
+    AsyncQueue,
 }

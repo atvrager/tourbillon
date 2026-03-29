@@ -24,6 +24,8 @@ pub enum Ty {
     Queue { elem: Box<Ty>, depth: Option<u64> },
     /// Cell element type (for port type checking)
     Cell { elem: Box<Ty> },
+    /// AsyncQueue element type (for port type checking)
+    AsyncQueue { elem: Box<Ty>, depth: Option<u64> },
     /// Option type (result of try_take/peek)
     Option(Box<Ty>),
     /// Named type reference (before resolution)
@@ -52,6 +54,7 @@ impl std::fmt::Display for Ty {
             Ty::Array { elem, size } => write!(f, "Array({size}, {elem})"),
             Ty::Queue { elem, .. } => write!(f, "Queue({elem})"),
             Ty::Cell { elem } => write!(f, "Cell({elem})"),
+            Ty::AsyncQueue { elem, .. } => write!(f, "AsyncQueue({elem})"),
             Ty::Option(inner) => write!(f, "Option({inner})"),
             Ty::Named(name) => write!(f, "{name}"),
             Ty::Error => write!(f, "<error>"),

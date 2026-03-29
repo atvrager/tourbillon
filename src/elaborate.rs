@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use petgraph::graph::{EdgeIndex, NodeIndex};
 
@@ -69,11 +69,12 @@ fn extract_init_value(ty_expr: &TypeExpr) -> Option<u64> {
     }
 }
 
-/// Extract the element type from a Queue or Cell type.
+/// Extract the element type from a Queue, Cell, or AsyncQueue type.
 fn port_element_type(ty: &Ty) -> Option<Ty> {
     match ty {
         Ty::Queue { elem, .. } => Some(*elem.clone()),
         Ty::Cell { elem } => Some(*elem.clone()),
+        Ty::AsyncQueue { elem, .. } => Some(*elem.clone()),
         _ => None,
     }
 }
@@ -177,6 +178,51 @@ fn elaborate_pipe(
         return None;
     }
 
+    // Domain collection: validate domain declarations and instance annotations
+    let mut domain_set: HashSet<String> = HashSet::new();
+    for decl in &pipe.domain_decls {
+        if !domain_set.insert(decl.name.node.clone()) {
+            diagnostics.push(Diagnostic::error(
+                decl.name.span.clone(),
+                format!("duplicate domain declaration `{}`", decl.name.node),
+            ));
+            had_error = true;
+        }
+    }
+
+    let mut domain_map: HashMap<String, Option<String>> = HashMap::new();
+    for (idx, inst) in pipe.instances.iter().enumerate() {
+        let proc_name = &inst.process_name.node;
+        let instance_name = find_instance_name(&instances, proc_name, idx);
+        let Some(instance_name) = instance_name else {
+            continue;
+        };
+
+        if let Some(ref domain_ann) = inst.domain {
+            if !domain_set.contains(&domain_ann.node) {
+                diagnostics.push(Diagnostic::error(
+                    domain_ann.span.clone(),
+                    format!("unknown domain `{}`", domain_ann.node),
+                ));
+                had_error = true;
+            } else {
+                domain_map.insert(instance_name, Some(domain_ann.node.clone()));
+            }
+        } else {
+            domain_map.insert(instance_name, None);
+        }
+    }
+
+    let domains: Vec<String> = pipe
+        .domain_decls
+        .iter()
+        .map(|d| d.name.node.clone())
+        .collect();
+
+    if had_error {
+        return None;
+    }
+
     // Phase 3: Collect queue edge data (deferred — added to graph after wiring)
     let mut pending_edges: HashMap<String, PendingEdge> = HashMap::new();
 
@@ -205,6 +251,62 @@ fn elaborate_pipe(
                 decl_span: decl.name.span.clone(),
             },
         );
+    }
+
+    // AsyncQueue edge creation (parallel to queue edges above)
+    for decl in &pipe.async_queue_decls {
+        let ty = type_env.resolve_type_expr(&decl.ty.node, diagnostics);
+        let elem_ty = match &ty {
+            Ty::AsyncQueue { elem, .. } => *elem.clone(),
+            Ty::Queue { elem, .. } => *elem.clone(),
+            _ => ty,
+        };
+        let queue_name = decl.name.node.clone();
+
+        let depth = match decl.depth {
+            Some(d) => d,
+            None => {
+                diagnostics.push(Diagnostic::error(
+                    decl.name.span.clone(),
+                    format!("AsyncQueue `{queue_name}` requires explicit depth"),
+                ));
+                had_error = true;
+                continue;
+            }
+        };
+
+        // Validate power-of-2
+        if depth == 0 || (depth & (depth - 1)) != 0 {
+            diagnostics.push(Diagnostic::error(
+                decl.name.span.clone(),
+                format!("AsyncQueue `{queue_name}` depth must be a power of 2, got {depth}"),
+            ));
+            had_error = true;
+            continue;
+        }
+
+        let edge_data = QueueEdge {
+            name: queue_name.clone(),
+            elem_ty,
+            depth,
+            kind: QueueEdgeKind::AsyncQueue,
+            span: decl.name.span.clone(),
+        };
+
+        pending_edges.insert(
+            queue_name,
+            PendingEdge {
+                edge_idx: None,
+                edge_data,
+                writer: None,
+                reader: None,
+                decl_span: decl.name.span.clone(),
+            },
+        );
+    }
+
+    if had_error {
+        return None;
     }
 
     // Phase 3a: Create implicit self-loop edges for all state ports first
@@ -478,8 +580,16 @@ fn elaborate_pipe(
     // Create deferred queue edges now that we know writers and readers.
     // Iterate in pipe declaration order for deterministic output.
     let mut queue_edge_map: HashMap<String, EdgeIndex> = HashMap::new();
-    for decl in &pipe.queue_decls {
-        let queue_name = &decl.name.node;
+
+    // Helper: collect all deferred edge names (queues + async queues) in declaration order
+    let deferred_names: Vec<String> = pipe
+        .queue_decls
+        .iter()
+        .map(|d| d.name.node.clone())
+        .chain(pipe.async_queue_decls.iter().map(|d| d.name.node.clone()))
+        .collect();
+
+    for queue_name in &deferred_names {
         let Some(pending) = pending_edges.get(queue_name) else {
             continue;
         };
@@ -586,11 +696,82 @@ fn elaborate_pipe(
         }
     }
 
+    // Cross-domain validation
+    if !domains.is_empty() {
+        for edge_idx in graph.edge_indices() {
+            let edge = &graph[edge_idx];
+            let (src_node, dst_node) = graph.edge_endpoints(edge_idx).unwrap();
+            let src_inst = &graph[src_node].instance_name;
+            let dst_inst = &graph[dst_node].instance_name;
+            let src_domain = domain_map.get(src_inst).cloned().flatten();
+            let dst_domain = domain_map.get(dst_inst).cloned().flatten();
+
+            match &edge.kind {
+                QueueEdgeKind::Queue { .. } => {
+                    // Sync queue crossing domains → error
+                    if src_domain != dst_domain {
+                        diagnostics.push(Diagnostic::error(
+                            edge.span.clone(),
+                            format!(
+                                "queue `{}` connects domains `{}` and `{}`; use AsyncQueue for cross-domain communication",
+                                edge.name,
+                                src_domain.as_deref().unwrap_or("default"),
+                                dst_domain.as_deref().unwrap_or("default"),
+                            ),
+                        ));
+                        had_error = true;
+                    }
+                }
+                QueueEdgeKind::AsyncQueue => {
+                    // Async queue within same domain → warning
+                    if src_domain == dst_domain {
+                        diagnostics.push(Diagnostic::warning(
+                            edge.span.clone(),
+                            format!(
+                                "AsyncQueue `{}` connects processes in the same domain; use Queue instead",
+                                edge.name
+                            ),
+                        ));
+                    }
+                }
+                QueueEdgeKind::Cell {
+                    peeker_instances, ..
+                } => {
+                    // Cell peek across domains → error
+                    // Self-loops are same node (always same domain), but cross-instance
+                    // peekers listed in peeker_instances must be in the same domain as the owner.
+                    let owner_domain = &src_domain;
+                    for peeker_name in peeker_instances {
+                        let peeker_domain = domain_map.get(peeker_name).cloned().flatten();
+                        if *owner_domain != peeker_domain {
+                            diagnostics.push(Diagnostic::error(
+                                edge.span.clone(),
+                                format!(
+                                    "Cell `{}` peek crosses domains `{}` and `{}`; cross-domain peek is not supported",
+                                    edge.name,
+                                    owner_domain.as_deref().unwrap_or("default"),
+                                    peeker_domain.as_deref().unwrap_or("default"),
+                                ),
+                            ));
+                            had_error = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if had_error {
+        return None;
+    }
+
     Some(ProcessNetwork {
         name: pipe.name.node.clone(),
         graph,
         instances,
         type_defs,
+        domains,
+        domain_map,
     })
 }
 

@@ -23,13 +23,44 @@ pub fn emit_dot(scheduled: &ScheduledNetwork) -> String {
     writeln!(out, "  rankdir=LR;").unwrap();
     writeln!(out, "  node [shape=box];").unwrap();
 
-    // Nodes
-    for idx in graph.node_indices() {
-        let node = &graph[idx];
-        if node.is_memory_stub {
-            continue;
+    // Nodes — group by domain if domains are declared
+    let domains = &network.domains;
+    if !domains.is_empty() {
+        // Group nodes by domain
+        for domain in domains {
+            writeln!(out, "  subgraph cluster_{domain} {{").unwrap();
+            writeln!(out, "    label=\"{domain}\";").unwrap();
+            for idx in graph.node_indices() {
+                let node = &graph[idx];
+                if node.is_memory_stub {
+                    continue;
+                }
+                if let Some(Some(d)) = network.domain_map.get(&node.instance_name)
+                    && d == domain
+                {
+                    writeln!(out, "    {};", sanitize_id(&node.instance_name)).unwrap();
+                }
+            }
+            writeln!(out, "  }}").unwrap();
         }
-        writeln!(out, "  {};", sanitize_id(&node.instance_name)).unwrap();
+        // Default domain nodes (no annotation)
+        for idx in graph.node_indices() {
+            let node = &graph[idx];
+            if node.is_memory_stub {
+                continue;
+            }
+            if let Some(None) | None = network.domain_map.get(&node.instance_name) {
+                writeln!(out, "  {};", sanitize_id(&node.instance_name)).unwrap();
+            }
+        }
+    } else {
+        for idx in graph.node_indices() {
+            let node = &graph[idx];
+            if node.is_memory_stub {
+                continue;
+            }
+            writeln!(out, "  {};", sanitize_id(&node.instance_name)).unwrap();
+        }
     }
 
     // Edges
@@ -45,21 +76,20 @@ pub fn emit_dot(scheduled: &ScheduledNetwork) -> String {
 
         let data = &graph[eidx];
 
-        let style = if non_blocking.contains(&eidx) {
-            "dotted"
-        } else {
-            match &data.kind {
-                QueueEdgeKind::Cell { init: Some(_), .. } => "dashed",
-                QueueEdgeKind::Cell { .. } => "bold",
-                QueueEdgeKind::Queue { .. } => "solid",
-            }
+        let (style, color) = match &data.kind {
+            // AsyncQueue always rendered distinctly regardless of non-blocking status
+            QueueEdgeKind::AsyncQueue => ("dashed", "red"),
+            _ if non_blocking.contains(&eidx) => ("dotted", "black"),
+            QueueEdgeKind::Cell { init: Some(_), .. } => ("dashed", "black"),
+            QueueEdgeKind::Cell { .. } => ("bold", "black"),
+            QueueEdgeKind::Queue { .. } => ("solid", "black"),
         };
 
         let label = format!("{}\\ndepth={}", data.name, data.depth);
 
         writeln!(
             out,
-            "  {} -> {} [label=\"{label}\" style={style}];",
+            "  {} -> {} [label=\"{label}\" style={style} color={color}];",
             sanitize_id(&src_node.instance_name),
             sanitize_id(&dst_node.instance_name),
         )

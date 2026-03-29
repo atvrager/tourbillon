@@ -84,6 +84,11 @@ pub enum TypeExpr {
         elem: Box<Spanned<TypeExpr>>,
         init: Option<Box<Spanned<Expr>>>,
     },
+    /// AsyncQueue type: `AsyncQueue(T, depth = N)`
+    AsyncQueue {
+        elem: Box<Spanned<TypeExpr>>,
+        depth: Option<u64>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -271,10 +276,24 @@ pub enum UnaryOp {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+pub struct DomainDecl {
+    pub name: Spanned<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AsyncQueueDecl {
+    pub name: Spanned<String>,
+    pub ty: Spanned<TypeExpr>,
+    pub depth: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Pipe {
     pub name: Spanned<String>,
     pub queue_decls: Vec<QueueDecl>,
     pub memory_decls: Vec<MemoryDecl>,
+    pub async_queue_decls: Vec<AsyncQueueDecl>,
+    pub domain_decls: Vec<DomainDecl>,
     pub instances: Vec<Instance>,
 }
 
@@ -301,6 +320,7 @@ pub struct MemoryDecl {
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub process_name: Spanned<String>,
+    pub domain: Option<Spanned<String>>,
     pub bindings: Vec<PortBinding>,
 }
 

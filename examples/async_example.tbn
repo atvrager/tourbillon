@@ -1,0 +1,48 @@
+-- Two-domain producer-consumer demonstrating AsyncQueue CDC crossing.
+--
+-- `fast` domain produces commands, `slow` domain consumes them and
+-- sends back responses through a second AsyncQueue.
+
+type Command  = Bits 32
+type Response = Bits 32
+
+process FastProducer {
+    state: seq : Cell(Bits 32, init = 0)
+    produces: out : Queue(Command)
+    rule go {
+        let s = seq.take()
+        out.put(s)
+        seq.put(s + 1)
+    }
+}
+
+process SlowConsumer {
+    consumes: inp : Queue(Command)
+    produces: out : Queue(Response)
+    rule go {
+        let cmd = inp.take()
+        out.put(cmd + 100)
+    }
+}
+
+process FastReceiver {
+    consumes: inp : Queue(Response)
+    state: last : Cell(Bits 32, init = 0)
+    rule go {
+        let r = inp.take()
+        let _ = last.take()
+        last.put(r)
+    }
+}
+
+pipe Top {
+    domain fast : Clock
+    domain slow : Clock
+
+    let cmd  = AsyncQueue(Command, depth = 4)
+    let resp = AsyncQueue(Response, depth = 4)
+
+    FastProducer [fast] { out = cmd }
+    SlowConsumer [slow] { inp = cmd, out = resp }
+    FastReceiver [fast] { inp = resp }
+}

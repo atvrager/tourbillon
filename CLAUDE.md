@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0–3 complete. Phase 2.4 (rv32ui compliance) complete: 38/38 rv32ui-p tests pass. Phase 3 (static deadlock analysis + DOT graph export) complete: SCC-based token/capacity checks, try_take relaxation, `tbn graph` subcommand. Indexed cell ports (`regs[32] : Cell(Word)`) implemented in desugar. Single-issue pipeline with done_q credit token. Instruction bug fixes (LUI, AUIPC, JAL/JALR return addresses, R-type rs2, sub-word loads/stores, x0 guard). ELF loader in tb_cpu.cpp. Custom riscv-tests env (no CSR). `TOURBILLON.md` is the authoritative specification.
+**Status:** Phase 0–3 complete. Phase 2.4 (rv32ui compliance) complete: 38/38 rv32ui-p tests pass. Phase 3 (static deadlock analysis + DOT graph export) complete: SCC-based token/capacity checks, try_take relaxation, `tbn graph` subcommand. AsyncQueue CDC primitive: `domain fast : Clock`, `AsyncQueue(T, depth=N)`, instance domain annotations `[domain]`, gray-code async FIFO SV generation, cross-domain validation, per-domain clock/reset ports. Indexed cell ports (`regs[32] : Cell(Word)`) implemented in desugar. Single-issue pipeline with done_q credit token. Instruction bug fixes (LUI, AUIPC, JAL/JALR return addresses, R-type rs2, sub-word loads/stores, x0 guard). ELF loader in tb_cpu.cpp. Custom riscv-tests env (no CSR). `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -52,6 +52,7 @@ Tourbillon has exactly three constructs:
 - **Pipe** — structural composition (wiring only, no logic). Single-writer single-reader invariant at IR level.
 - **Memory(K → V, depth, latency)** — addressable storage. Desugars to request/response queues. Compiler maps to vendor BRAM/SRAM.
 - **Multi-producer arbitration** — `priority = [...]` or `arbitration = round_robin` on queues. Desugars to compiler-generated arbiter process.
+- **AsyncQueue(T, depth=N)** — clock domain crossing FIFO. Gray-code async FIFO in SV. Depth must be power of 2. Pipe-level `domain <name> : Clock` declarations, instances annotated with `[domain_name]`. Compiler enforces: sync Queue cannot cross domains, AsyncQueue must cross domains, Cell peek cannot cross domains.
 - **Async sources** — `source = async` annotation for external inputs (interrupts, bus interfaces). Compiler generates synchroniser.
 
 ### Compiler Pipeline (8 stages)
@@ -123,9 +124,11 @@ tests/
   lower.rs           -- Lowering / SV codegen integration tests
   provenance.rs      -- Provenance hashing and embedding tests
   deadlock.rs        -- Deadlock analysis + DOT graph integration tests
+  async_queue.rs     -- AsyncQueue CDC: parsing, elaboration, lowering, DOT tests
   riscv_tests.rs     -- rv32ui compliance: build sim + run 38 tests via Verilator
 examples/
   rv32i.tbn          -- RV32I reference core (4-stage pipeline)
+  async_example.tbn  -- Two-domain CDC producer-consumer (AsyncQueue)
   counter.tbn        -- Simple counter (Cell + take/put)
   producer_consumer.tbn -- Queue producer/consumer
   branch.tbn         -- Conditional routing

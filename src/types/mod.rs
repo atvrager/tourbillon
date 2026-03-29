@@ -74,6 +74,11 @@ fn check_pipe(pipe: &Pipe, env: &TypeEnv, diagnostics: &mut Vec<Diagnostic>) {
         env.resolve_type_expr(&decl.ty.node, diagnostics);
     }
 
+    // Check async queue declarations have valid types
+    for decl in &pipe.async_queue_decls {
+        env.resolve_type_expr(&decl.ty.node, diagnostics);
+    }
+
     // Check instances reference valid names
     for instance in &pipe.instances {
         // TODO: look up process definition and check port bindings

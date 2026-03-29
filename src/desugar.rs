@@ -299,6 +299,7 @@ fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
     // Generate the instance that wires the memory process to its queues
     let instance = Instance {
         process_name: Spanned::new(process.name.node.clone(), span.clone()),
+        domain: None,
         bindings: vec![
             PortBinding {
                 port: Spanned::new("read_req".to_string(), span.clone()),

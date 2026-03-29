@@ -137,6 +137,14 @@ pub fn classify_non_blocking_edges(scheduled: &ScheduledNetwork) -> HashSet<Edge
         })
         .collect();
 
+    // AsyncQueue edges are always non-blocking for deadlock analysis:
+    // cross-clock synchronization latency makes single-clock token counting invalid.
+    // They're already in the non_blocking set; ensure they're never removed below.
+    let async_edges: HashSet<EdgeIndex> = graph
+        .edge_indices()
+        .filter(|&eidx| matches!(graph[eidx].kind, QueueEdgeKind::AsyncQueue))
+        .collect();
+
     for node_idx in graph.node_indices() {
         let node = &graph[node_idx];
         let schedule = match scheduled.schedules.get(&node_idx) {
@@ -157,14 +165,16 @@ pub fn classify_non_blocking_edges(scheduled: &ScheduledNetwork) -> HashSet<Edge
                 if !resources.try_takes.contains(port_name)
                     && let Some(&edge) = port_map.get(port_name.as_str())
                     && !memory_stub_edges.contains(&edge)
+                    && !async_edges.contains(&edge)
                 {
                     non_blocking.remove(&edge);
                 }
             }
-            // All puts are blocking (unless to memory stubs)
+            // All puts are blocking (unless to memory stubs or async queues)
             for port_name in &resources.puts {
                 if let Some(&edge) = port_map.get(port_name.as_str())
                     && !memory_stub_edges.contains(&edge)
+                    && !async_edges.contains(&edge)
                 {
                     non_blocking.remove(&edge);
                 }

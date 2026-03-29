@@ -37,6 +37,22 @@ where
                 depth,
             });
 
+        let async_queue_type = just(Token::AsyncQueue)
+            .ignore_then(just(Token::LParen))
+            .ignore_then(type_expr.clone())
+            .then(
+                just(Token::Comma)
+                    .ignore_then(just(Token::Depth))
+                    .ignore_then(just(Token::Assign))
+                    .ignore_then(select! { Token::Int(n) => n })
+                    .or_not(),
+            )
+            .then_ignore(just(Token::RParen))
+            .map(|(elem, depth)| TypeExpr::AsyncQueue {
+                elem: Box::new(elem),
+                depth,
+            });
+
         let cell_type = just(Token::Cell)
             .ignore_then(just(Token::LParen))
             .ignore_then(type_expr.clone())
@@ -105,6 +121,7 @@ where
 
         let atom = choice((
             queue_type,
+            async_queue_type,
             cell_type,
             paren_type,
             named_with_parens,
@@ -668,6 +685,8 @@ where
 enum PipeItem {
     Queue(QueueDecl),
     Memory(MemoryDecl),
+    AsyncQueue(AsyncQueueDecl),
+    Domain(DomainDecl),
     Instance(Instance),
 }
 
@@ -737,6 +756,30 @@ where
             latency,
         });
 
+    // AsyncQueue declaration: let <ident> = AsyncQueue(<type>, depth = <int>)
+    let async_queue_decl = just(Token::Let)
+        .ignore_then(ident_spanned)
+        .then_ignore(just(Token::Assign))
+        .then_ignore(just(Token::AsyncQueue))
+        .then_ignore(just(Token::LParen))
+        .then(type_expr_parser())
+        .then(
+            just(Token::Comma)
+                .ignore_then(just(Token::Depth))
+                .ignore_then(just(Token::Assign))
+                .ignore_then(select! { Token::Int(n) => n })
+                .or_not(),
+        )
+        .then_ignore(just(Token::RParen))
+        .map(|((name, ty), depth)| AsyncQueueDecl { name, ty, depth });
+
+    // Domain declaration: domain <ident> : Clock
+    let domain_decl = just(Token::Domain)
+        .ignore_then(ident_spanned)
+        .then_ignore(just(Token::Colon))
+        .then_ignore(just(Token::Clock))
+        .map(|name| DomainDecl { name });
+
     let port_binding = ident_spanned
         .then_ignore(just(Token::Assign))
         .then(
@@ -748,15 +791,23 @@ where
         )
         .map(|(port, target)| PortBinding { port, target });
 
+    // Instance with optional domain annotation: Name [domain] { ... }
     let instance = ident_spanned
+        .then(
+            select! { Token::Ident(s) => s }
+                .map_with(|s: &str, e| spn(s.to_string(), e.span()))
+                .delimited_by(just(Token::LBrack), just(Token::RBrack))
+                .or_not(),
+        )
         .then(
             port_binding
                 .separated_by(just(Token::Comma).or_not())
                 .collect::<Vec<_>>()
                 .delimited_by(just(Token::LBrace), just(Token::RBrace)),
         )
-        .map(|(process_name, bindings)| Instance {
+        .map(|((process_name, domain), bindings)| Instance {
             process_name,
+            domain,
             bindings,
         });
 
@@ -765,7 +816,9 @@ where
         .then(
             choice((
                 memory_decl.map(PipeItem::Memory),
+                async_queue_decl.map(PipeItem::AsyncQueue),
                 queue_decl.map(PipeItem::Queue),
+                domain_decl.map(PipeItem::Domain),
                 instance.map(PipeItem::Instance),
             ))
             .repeated()
@@ -775,11 +828,15 @@ where
         .map(|(name, items)| {
             let mut queue_decls = vec![];
             let mut memory_decls = vec![];
+            let mut async_queue_decls = vec![];
+            let mut domain_decls = vec![];
             let mut instances = vec![];
             for item in items {
                 match item {
                     PipeItem::Queue(q) => queue_decls.push(q),
                     PipeItem::Memory(m) => memory_decls.push(m),
+                    PipeItem::AsyncQueue(aq) => async_queue_decls.push(aq),
+                    PipeItem::Domain(d) => domain_decls.push(d),
                     PipeItem::Instance(i) => instances.push(i),
                 }
             }
@@ -787,6 +844,8 @@ where
                 name,
                 queue_decls,
                 memory_decls,
+                async_queue_decls,
+                domain_decls,
                 instances,
             }
         })

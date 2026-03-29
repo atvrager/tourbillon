@@ -41,7 +41,9 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
         Expr::Take { queue } => {
             if let Some(ty) = env.lookup(queue) {
                 match ty {
-                    Ty::Queue { elem, .. } | Ty::Cell { elem } => *elem.clone(),
+                    Ty::Queue { elem, .. } | Ty::Cell { elem } | Ty::AsyncQueue { elem, .. } => {
+                        *elem.clone()
+                    }
                     _ => {
                         diagnostics.push(Diagnostic::error(
                             expr.span.clone(),
@@ -62,7 +64,7 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
         Expr::TryTake { queue } => {
             if let Some(ty) = env.lookup(queue) {
                 match ty {
-                    Ty::Queue { elem, .. } | Ty::Cell { elem } => {
+                    Ty::Queue { elem, .. } | Ty::Cell { elem } | Ty::AsyncQueue { elem, .. } => {
                         Ty::Option(Box::new(*elem.clone()))
                     }
                     _ => {
@@ -85,7 +87,7 @@ pub fn check_expr(expr: &Spanned<Expr>, env: &TypeEnv, diagnostics: &mut Vec<Dia
         Expr::Peek { queue } => {
             if let Some(ty) = env.lookup(queue) {
                 match ty {
-                    Ty::Queue { elem, .. } | Ty::Cell { elem } => {
+                    Ty::Queue { elem, .. } | Ty::Cell { elem } | Ty::AsyncQueue { elem, .. } => {
                         Ty::Option(Box::new(*elem.clone()))
                     }
                     _ => {
@@ -309,7 +311,9 @@ pub fn check_stmt(stmt: &Spanned<Stmt>, env: &mut TypeEnv, diagnostics: &mut Vec
             let val_ty = check_expr(value, env, diagnostics);
             if let Some(port_ty) = env.lookup(&target.node) {
                 let expected = match port_ty {
-                    Ty::Queue { elem, .. } | Ty::Cell { elem } => Some(*elem.clone()),
+                    Ty::Queue { elem, .. } | Ty::Cell { elem } | Ty::AsyncQueue { elem, .. } => {
+                        Some(*elem.clone())
+                    }
                     _ => {
                         diagnostics.push(Diagnostic::error(
                             target.span.clone(),

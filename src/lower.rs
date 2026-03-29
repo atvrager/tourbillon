@@ -41,7 +41,7 @@ pub fn bit_width(ty: &Ty) -> u64 {
         Ty::Array { elem, size } => bit_width(elem) * size,
         Ty::Option(inner) => 1 + bit_width(inner),
         // These shouldn't appear at lowering level
-        Ty::Queue { .. } | Ty::Cell { .. } | Ty::Named(_) | Ty::Error => 0,
+        Ty::Queue { .. } | Ty::Cell { .. } | Ty::AsyncQueue { .. } | Ty::Named(_) | Ty::Error => 0,
     }
 }
 
@@ -101,6 +101,92 @@ fn fifo_module_sv() -> &'static str {
                 2'b01:   count <= count - 1;
                 default: ;
             endcase
+        end
+    end
+endmodule
+"#
+}
+
+fn async_fifo_module_sv() -> &'static str {
+    r#"module tbn_async_fifo #(
+    parameter WIDTH = 8,
+    parameter DEPTH = 4
+)(
+    input  wire              wr_clk,
+    input  wire              wr_rst_n,
+    input  wire              enq_valid,
+    output wire              enq_ready,
+    input  wire [WIDTH-1:0]  enq_data,
+    input  wire              rd_clk,
+    input  wire              rd_rst_n,
+    output wire              deq_valid,
+    input  wire              deq_ready,
+    output wire [WIDTH-1:0]  deq_data
+);
+    localparam AWIDTH = $clog2(DEPTH);
+
+    reg [WIDTH-1:0] storage [0:DEPTH-1];
+
+    // Write-side pointers (wr_clk domain)
+    reg [AWIDTH:0] wr_ptr_bin;
+    wire [AWIDTH:0] wr_ptr_gray;
+    reg [AWIDTH:0] wr_ptr_gray_sync1;
+    reg [AWIDTH:0] wr_ptr_gray_sync2;
+
+    // Read-side pointers (rd_clk domain)
+    reg [AWIDTH:0] rd_ptr_bin;
+    wire [AWIDTH:0] rd_ptr_gray;
+    reg [AWIDTH:0] rd_ptr_gray_sync1;
+    reg [AWIDTH:0] rd_ptr_gray_sync2;
+
+    // Binary-to-gray conversion
+    assign wr_ptr_gray = wr_ptr_bin ^ (wr_ptr_bin >> 1);
+    assign rd_ptr_gray = rd_ptr_bin ^ (rd_ptr_bin >> 1);
+
+    // Full: MSBs differ, remaining bits match (gray code property)
+    wire full  = (wr_ptr_gray[AWIDTH] != rd_ptr_gray_sync2[AWIDTH]) &&
+                 (wr_ptr_gray[AWIDTH-1] != rd_ptr_gray_sync2[AWIDTH-1]) &&
+                 (wr_ptr_gray[AWIDTH-2:0] == rd_ptr_gray_sync2[AWIDTH-2:0]);
+    // Empty: gray pointers equal
+    wire empty = (rd_ptr_gray == wr_ptr_gray_sync2);
+
+    assign enq_ready = ~full;
+    assign deq_valid = ~empty;
+    assign deq_data  = storage[rd_ptr_bin[AWIDTH-1:0]];
+
+    wire do_enq = enq_valid & enq_ready;
+    wire do_deq = deq_ready & deq_valid;
+
+    // Write-side logic (wr_clk)
+    always_ff @(posedge wr_clk or negedge wr_rst_n) begin
+        if (!wr_rst_n) begin
+            wr_ptr_bin <= '0;
+            rd_ptr_gray_sync1 <= '0;
+            rd_ptr_gray_sync2 <= '0;
+        end else begin
+            // 2-FF synchronizer for read pointer into write domain
+            rd_ptr_gray_sync1 <= rd_ptr_gray;
+            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1;
+            if (do_enq) begin
+                storage[wr_ptr_bin[AWIDTH-1:0]] <= enq_data;
+                wr_ptr_bin <= wr_ptr_bin + 1;
+            end
+        end
+    end
+
+    // Read-side logic (rd_clk)
+    always_ff @(posedge rd_clk or negedge rd_rst_n) begin
+        if (!rd_rst_n) begin
+            rd_ptr_bin <= '0;
+            wr_ptr_gray_sync1 <= '0;
+            wr_ptr_gray_sync2 <= '0;
+        end else begin
+            // 2-FF synchronizer for write pointer into read domain
+            wr_ptr_gray_sync1 <= wr_ptr_gray;
+            wr_ptr_gray_sync2 <= wr_ptr_gray_sync1;
+            if (do_deq) begin
+                rd_ptr_bin <= rd_ptr_bin + 1;
+            end
         end
     end
 endmodule
@@ -335,20 +421,42 @@ fn collect_takes_in_expr(expr: &Expr, takes: &mut BTreeSet<String>) {
 // ---------------------------------------------------------------------------
 
 /// Lower scheduled networks to SystemVerilog files.
+/// Returns true for Queue and AsyncQueue edge kinds (not Cell).
+fn is_queue_like(kind: &QueueEdgeKind) -> bool {
+    matches!(
+        kind,
+        QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue
+    )
+}
+
 pub fn lower(scheduled: &[ScheduledNetwork], provenance: Option<[u8; 32]>) -> Vec<SvFile> {
     let mut files = vec![];
 
-    let has_queues = scheduled.iter().any(|sn| {
+    let has_sync_queues = scheduled.iter().any(|sn| {
         sn.network
             .graph
             .edge_weights()
             .any(|e| matches!(e.kind, QueueEdgeKind::Queue { .. }))
     });
 
-    if has_queues {
+    let has_async_queues = scheduled.iter().any(|sn| {
+        sn.network
+            .graph
+            .edge_weights()
+            .any(|e| matches!(e.kind, QueueEdgeKind::AsyncQueue))
+    });
+
+    if has_sync_queues {
         files.push(SvFile {
             name: "tbn_fifo.sv".to_string(),
             content: fifo_module_sv().to_string(),
+        });
+    }
+
+    if has_async_queues {
+        files.push(SvFile {
+            name: "tbn_async_fifo.sv".to_string(),
+            content: async_fifo_module_sv().to_string(),
         });
     }
 
@@ -452,22 +560,40 @@ impl<'a> SvEmitter<'a> {
         let pipe_name = self.net.network.name.clone();
         let mem_ports = self.collect_memory_port_decls();
 
+        let domains = &self.net.network.domains;
+        let has_domains = !domains.is_empty();
+
+        // Determine if any process uses the default domain (no annotation)
+        let has_default_domain =
+            !has_domains || self.net.network.domain_map.values().any(|d| d.is_none());
+
         self.line(&format!("module {pipe_name} ("));
         self.indent();
-        if mem_ports.is_empty() {
-            self.line("input  wire clk,");
-            self.line("input  wire rst_n");
-        } else {
-            self.line("input  wire clk,");
-            self.line("input  wire rst_n,");
-            for (i, port) in mem_ports.iter().enumerate() {
-                if i + 1 < mem_ports.len() {
-                    self.line(&format!("{port},"));
-                } else {
-                    self.line(port);
-                }
+
+        let mut all_ports: Vec<String> = vec![];
+
+        if has_default_domain || !has_domains {
+            all_ports.push("input  wire clk".to_string());
+            all_ports.push("input  wire rst_n".to_string());
+        }
+
+        if has_domains {
+            for domain in domains {
+                all_ports.push(format!("input  wire {domain}_clk"));
+                all_ports.push(format!("input  wire {domain}_rst_n"));
             }
         }
+
+        all_ports.extend(mem_ports);
+
+        for (i, port) in all_ports.iter().enumerate() {
+            if i + 1 < all_ports.len() {
+                self.line(&format!("{port},"));
+            } else {
+                self.line(port);
+            }
+        }
+
         self.dedent();
         self.line(");");
 
@@ -591,10 +717,28 @@ impl<'a> SvEmitter<'a> {
     // Queue FIFO declarations and instances
     // -----------------------------------------------------------------------
 
+    /// Determine the clock signal name for an instance based on its domain.
+    fn clock_for_instance(&self, instance_name: &str) -> String {
+        if let Some(Some(domain)) = self.net.network.domain_map.get(instance_name) {
+            format!("{domain}_clk")
+        } else {
+            "clk".to_string()
+        }
+    }
+
+    /// Determine the reset signal name for an instance based on its domain.
+    fn reset_for_instance(&self, instance_name: &str) -> String {
+        if let Some(Some(domain)) = self.net.network.domain_map.get(instance_name) {
+            format!("{domain}_rst_n")
+        } else {
+            "rst_n".to_string()
+        }
+    }
+
     fn emit_queue_instances(&mut self) {
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
-            if !matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
+            if !is_queue_like(&edge.kind) {
                 continue;
             }
             // Skip memory-exposed edges — no FIFO, signals are module ports
@@ -610,7 +754,12 @@ impl<'a> SvEmitter<'a> {
             let is_structured = matches!(edge.elem_ty, Ty::Record { .. } | Ty::Enum { .. });
             let wd = width_decl(w);
 
-            self.line(&format!("// Queue: {}", edge.name));
+            let kind_label = if matches!(edge.kind, QueueEdgeKind::AsyncQueue) {
+                "AsyncQueue"
+            } else {
+                "Queue"
+            };
+            self.line(&format!("// {kind_label}: {}", edge.name));
             self.line(&format!("logic        q_{sname}_enq_valid;"));
             self.line(&format!("wire         q_{sname}_enq_ready;"));
             if is_structured {
@@ -631,6 +780,45 @@ impl<'a> SvEmitter<'a> {
                 self.line(&format!("wire  {wd}q_{sname}_deq_data;"));
             }
             self.blank();
+
+            if matches!(edge.kind, QueueEdgeKind::AsyncQueue) {
+                // Async FIFO: look up writer/reader domains for clock wiring
+                let (src_node, dst_node) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
+                let wr_clk =
+                    self.clock_for_instance(&self.net.network.graph[src_node].instance_name);
+                let wr_rst =
+                    self.reset_for_instance(&self.net.network.graph[src_node].instance_name);
+                let rd_clk =
+                    self.clock_for_instance(&self.net.network.graph[dst_node].instance_name);
+                let rd_rst =
+                    self.reset_for_instance(&self.net.network.graph[dst_node].instance_name);
+
+                self.line(&format!(
+                    "tbn_async_fifo #(.WIDTH({w}), .DEPTH({})) aq_{sname}_inst (",
+                    edge.depth
+                ));
+                self.indent();
+                self.line(&format!(".wr_clk({wr_clk}),"));
+                self.line(&format!(".wr_rst_n({wr_rst}),"));
+                self.line(&format!(".enq_valid(q_{sname}_enq_valid),"));
+                self.line(&format!(".enq_ready(q_{sname}_enq_ready),"));
+                self.line(&format!(".enq_data(q_{sname}_enq_data),"));
+                self.line(&format!(".deq_valid(q_{sname}_deq_valid),"));
+                self.line(&format!(".deq_ready(q_{sname}_deq_ready),"));
+                self.line(&format!(".rd_clk({rd_clk}),"));
+                self.line(&format!(".rd_rst_n({rd_rst}),"));
+                if is_structured {
+                    self.line(&format!(".deq_data(q_{sname}_deq_data_raw)"));
+                } else {
+                    self.line(&format!(".deq_data(q_{sname}_deq_data)"));
+                }
+                self.dedent();
+                self.line(");");
+                self.blank();
+                continue;
+            }
+
+            // Sync FIFO
             self.line(&format!(
                 "tbn_fifo #(.WIDTH({w}), .DEPTH({})) q_{sname}_inst (",
                 edge.depth
@@ -712,21 +900,21 @@ impl<'a> SvEmitter<'a> {
                     // can_fire = conjunction of queue readiness conditions
                     let mut conditions = vec![];
 
-                    // Blocking takes on Queue edges require deq_valid
+                    // Blocking takes on Queue/AsyncQueue edges require deq_valid
                     for take_port in &blocking_takes[rule_idx] {
                         if let Some(&edge_idx) = port_edges.get(take_port) {
                             let edge = &self.net.network.graph[edge_idx];
-                            if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
+                            if is_queue_like(&edge.kind) {
                                 conditions.push(format!("q_{}_deq_valid", sanitize(&edge.name)));
                             }
                         }
                     }
 
-                    // Puts on Queue edges require enq_ready
+                    // Puts on Queue/AsyncQueue edges require enq_ready
                     for put_port in &schedule.rule_resources[rule_idx].puts {
                         if let Some(&edge_idx) = port_edges.get(put_port) {
                             let edge = &self.net.network.graph[edge_idx];
-                            if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
+                            if is_queue_like(&edge.kind) {
                                 conditions.push(format!("q_{}_enq_ready", sanitize(&edge.name)));
                             }
                         }
@@ -782,7 +970,7 @@ impl<'a> SvEmitter<'a> {
             .network
             .graph
             .edge_weights()
-            .any(|e| matches!(e.kind, QueueEdgeKind::Queue { .. }));
+            .any(|e| is_queue_like(&e.kind));
         let has_rules = self
             .net
             .network
@@ -810,7 +998,7 @@ impl<'a> SvEmitter<'a> {
         // Default Queue enq signals (skip dead-side memory edges)
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
-            if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
+            if is_queue_like(&edge.kind) {
                 // For memory edges where CPU is reader, enq side is dead (no stub to drive it)
                 if let Some(&cpu_is_writer) = self.memory_edges.get(&edge_idx)
                     && !cpu_is_writer
@@ -905,7 +1093,7 @@ impl<'a> SvEmitter<'a> {
                 for port_name in &blocking {
                     if let Some(&edge_idx) = port_edges.get(port_name) {
                         let edge = &self.net.network.graph[edge_idx];
-                        if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
+                        if is_queue_like(&edge.kind) {
                             deq_ready_drivers
                                 .entry(edge_idx)
                                 .or_default()
@@ -919,7 +1107,7 @@ impl<'a> SvEmitter<'a> {
                 for port_name in &try_takes {
                     if let Some(&edge_idx) = port_edges.get(port_name) {
                         let edge = &self.net.network.graph[edge_idx];
-                        if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
+                        if is_queue_like(&edge.kind) {
                             let sname = sanitize(&edge.name);
                             deq_ready_drivers.entry(edge_idx).or_default().push(format!(
                                 "(r_{inst}_{rule_name}_will_fire & q_{sname}_deq_valid)"
@@ -933,7 +1121,7 @@ impl<'a> SvEmitter<'a> {
         // Emit assign for each queue's deq_ready
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
-            if !matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
+            if !is_queue_like(&edge.kind) {
                 continue;
             }
             // Skip memory edges where CPU is writer — deq side is dead
@@ -958,7 +1146,7 @@ impl<'a> SvEmitter<'a> {
             .network
             .graph
             .edge_weights()
-            .any(|e| matches!(e.kind, QueueEdgeKind::Queue { .. }))
+            .any(|e| is_queue_like(&e.kind))
         {
             self.blank();
         }
@@ -984,9 +1172,17 @@ impl<'a> SvEmitter<'a> {
                     }
                 });
 
-                self.line("always_ff @(posedge clk or negedge rst_n) begin");
+                // Determine the clock domain for this cell (from the owning process)
+                let (src_node, _) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
+                let inst_name = &self.net.network.graph[src_node].instance_name;
+                let clk = self.clock_for_instance(inst_name);
+                let rst = self.reset_for_instance(inst_name);
+
+                self.line(&format!(
+                    "always_ff @(posedge {clk} or negedge {rst}) begin"
+                ));
                 self.indent();
-                self.line("if (!rst_n)");
+                self.line(&format!("if (!{rst})"));
                 self.indent();
                 self.line(&format!("c_{sname}_q <= {init_val};"));
                 self.dedent();
@@ -1032,7 +1228,7 @@ impl<'a> SvEmitter<'a> {
                             self.line(&format!("c_{sname}_d = {val_sv};"));
                             self.line(&format!("c_{sname}_en = 1'b1;"));
                         }
-                        QueueEdgeKind::Queue { .. } => {
+                        QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue => {
                             self.line(&format!("q_{sname}_enq_data = {val_sv};"));
                             self.line(&format!("q_{sname}_enq_valid = 1'b1;"));
                         }
@@ -1107,7 +1303,9 @@ impl<'a> SvEmitter<'a> {
                     let sname = sanitize(&edge.name);
                     match &edge.kind {
                         QueueEdgeKind::Cell { .. } => format!("c_{sname}_q"),
-                        QueueEdgeKind::Queue { .. } => format!("q_{sname}_deq_data"),
+                        QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue => {
+                            format!("q_{sname}_deq_data")
+                        }
                     }
                 } else {
                     format!("/* unknown port {queue} */ '0")

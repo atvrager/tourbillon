@@ -143,6 +143,10 @@ impl TypeEnv {
             TypeExpr::Cell { elem, .. } => Ty::Cell {
                 elem: Box::new(self.resolve_type_expr(&elem.node, diagnostics)),
             },
+            TypeExpr::AsyncQueue { elem, depth } => Ty::AsyncQueue {
+                elem: Box::new(self.resolve_type_expr(&elem.node, diagnostics)),
+                depth: *depth,
+            },
         }
     }
 
