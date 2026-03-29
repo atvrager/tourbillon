@@ -34,7 +34,7 @@ module mem_model #(
 
     localparam AW = $clog2(DEPTH);
 
-    reg [31:0] storage [0:DEPTH-1] /* verilator public_flat_rw */;
+    reg [31:0] storage [0:DEPTH-1];
 
     // Always ready, always valid — combinational lookup table
     assign rd_req_ready  = 1'b1;

@@ -165,6 +165,11 @@ module soc_top (
     end
 
     // -------------------------------------------------------------------------
+    // next_pc_q is pre-loaded with reset vector (0x80000000) by the C++ testbench
+    // via Verilator public access. This is the one remaining rootp poke —
+    // FIFO INIT_VALUE support for arbitrary values is a future language feature.
+
+    // -------------------------------------------------------------------------
     // tohost monitor — watch dev_mem writes to 0x80001000
     // -------------------------------------------------------------------------
     localparam [31:0] TOHOST_ADDR = 32'h8000_1000;

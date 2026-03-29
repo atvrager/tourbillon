@@ -1,6 +1,8 @@
 module tbn_fifo #(
     parameter WIDTH = 8,
-    parameter DEPTH = 2
+    parameter DEPTH = 2,
+    parameter INIT_COUNT = 0,
+    parameter [WIDTH-1:0] INIT_VALUE = '0
 )(
     input  wire              clk,
     input  wire              rst_n,
@@ -28,8 +30,10 @@ module tbn_fifo #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_ptr <= '0;
-            wr_ptr <= '0;
-            count  <= '0;
+            count  <= INIT_COUNT;
+            wr_ptr <= INIT_COUNT[AWIDTH-1:0];
+            for (integer _i = 0; _i < INIT_COUNT && _i < DEPTH; _i++)
+                storage[_i] <= INIT_VALUE;
         end else begin
             if (do_enq) begin
                 storage[wr_ptr] <= enq_data;

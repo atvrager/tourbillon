@@ -140,7 +140,7 @@ module tb_top (
         end
     end
 
-    // done_q pre-loading is handled in tb_cpu.cpp after the reset sequence
+    // done_q credit token is pre-loaded by FIFO INIT_COUNT parameter
 
     // -------------------------------------------------------------------------
     // tohost monitor — watch for dmem writes to 0x80001000

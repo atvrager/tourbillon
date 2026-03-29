@@ -11,13 +11,16 @@
 #include <verilated.h>
 #include <verilated_fst_c.h>
 #include "Vsoc_top.h"
-#include "Vsoc_top___024root.h"
+#include "Vsoc_top___024root.h"  // needed for next_pc_q preload only
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <string>
+#include <vector>
 #include <time.h>
+#include <unistd.h>
 
 // ---------------------------------------------------------------------------
 // DPI: uart_tx — prints characters to stdout
@@ -57,15 +60,19 @@ static const uint32_t PT_LOAD    = 1;
 static const uint32_t SHT_SYMTAB = 2;
 static const uint32_t MEM_BASE   = 0x80000000;
 
-static uint32_t load_elf(const char *path, Vsoc_top *dut) {
+/// Convert ELF to a temporary hex file for $readmemh loading.
+/// Returns the temp file path (caller must unlink), or empty on failure.
+static std::string elf_to_hex(const char *path) {
     FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "[soc_tb] Cannot open ELF: %s\n", path); return 0; }
+    if (!f) { fprintf(stderr, "[soc_tb] Cannot open ELF: %s\n", path); return ""; }
 
     Elf32_Ehdr ehdr;
-    if (fread(&ehdr, sizeof(ehdr), 1, f) != 1) { fclose(f); return 0; }
-    if (memcmp(ehdr.e_ident, "\x7f""ELF", 4) != 0) { fclose(f); return 0; }
+    if (fread(&ehdr, sizeof(ehdr), 1, f) != 1) { fclose(f); return ""; }
+    if (memcmp(ehdr.e_ident, "\x7f""ELF", 4) != 0) { fclose(f); return ""; }
 
-    // Load segments into BOTH imem and dmem
+    // Collect all words from PT_LOAD segments
+    uint32_t mem[16384] = {};
+    uint32_t max_idx = 0;
     for (int i = 0; i < ehdr.e_phnum; i++) {
         Elf32_Phdr phdr;
         fseek(f, ehdr.e_phoff + i * ehdr.e_phentsize, SEEK_SET);
@@ -76,55 +83,32 @@ static uint32_t load_elf(const char *path, Vsoc_top *dut) {
         fseek(f, phdr.p_offset, SEEK_SET);
         size_t nread = fread(buf, 1, phdr.p_filesz, f);
 
-        uint32_t base = phdr.p_paddr;
         for (size_t j = 0; j < nread; j += 4) {
             uint32_t word = 0;
             for (size_t k = 0; k < 4 && (j + k) < nread; k++)
                 word |= ((uint32_t)buf[j + k]) << (k * 8);
-            uint32_t addr = base + j;
+            uint32_t addr = phdr.p_paddr + j;
             if (addr >= MEM_BASE) {
                 uint32_t idx = (addr - MEM_BASE) >> 2;
                 if (idx < 16384) {
-                    dut->rootp->soc_top__DOT__imem__DOT__storage[idx] = word;
-                    dut->rootp->soc_top__DOT__dmem__DOT__storage[idx] = word;
+                    mem[idx] = word;
+                    if (idx > max_idx) max_idx = idx;
                 }
             }
         }
         delete[] buf;
     }
-
-    // Find tohost symbol
-    uint32_t tohost_addr = 0;
-    for (int i = 0; i < ehdr.e_shnum; i++) {
-        Elf32_Shdr shdr;
-        fseek(f, ehdr.e_shoff + i * ehdr.e_shentsize, SEEK_SET);
-        if (fread(&shdr, sizeof(shdr), 1, f) != 1) continue;
-        if (shdr.sh_type != SHT_SYMTAB) continue;
-
-        Elf32_Shdr strtab;
-        fseek(f, ehdr.e_shoff + shdr.sh_link * ehdr.e_shentsize, SEEK_SET);
-        if (fread(&strtab, sizeof(strtab), 1, f) != 1) continue;
-
-        char *str = new char[strtab.sh_size];
-        fseek(f, strtab.sh_offset, SEEK_SET);
-        fread(str, 1, strtab.sh_size, f);
-
-        int nsyms = shdr.sh_size / shdr.sh_entsize;
-        for (int s = 0; s < nsyms; s++) {
-            Elf32_Sym sym;
-            fseek(f, shdr.sh_offset + s * shdr.sh_entsize, SEEK_SET);
-            if (fread(&sym, sizeof(sym), 1, f) != 1) continue;
-            if (sym.st_name < strtab.sh_size && strcmp(&str[sym.st_name], "tohost") == 0) {
-                tohost_addr = sym.st_value;
-                break;
-            }
-        }
-        delete[] str;
-        if (tohost_addr) break;
-    }
-
     fclose(f);
-    return tohost_addr;
+
+    // Write hex file
+    char tmp[] = "/tmp/tbn_soc_XXXXXX.hex";
+    int fd = mkstemps(tmp, 4);
+    if (fd < 0) { fprintf(stderr, "[soc_tb] Cannot create temp hex file\n"); return ""; }
+    FILE *hf = fdopen(fd, "w");
+    for (uint32_t i = 0; i <= max_idx; i++)
+        fprintf(hf, "%08x\n", mem[i]);
+    fclose(hf);
+    return std::string(tmp);
 }
 
 // ---------------------------------------------------------------------------
@@ -147,9 +131,28 @@ int main(int argc, char **argv) {
             elf_file = argv[i];
     }
 
-    Vsoc_top *dut = new Vsoc_top;
+    // If an ELF file is given, convert to hex and re-exec with +memfile=
+    if (elf_file) {
+        std::string hex_path = elf_to_hex(elf_file);
+        if (hex_path.empty()) return 1;
 
-    if (elf_file) load_elf(elf_file, dut);
+        // Build new argv with +memfile= instead of the ELF path
+        std::string plusarg = "+memfile=" + hex_path;
+        std::vector<char*> new_argv;
+        for (int i = 0; i < argc; i++) {
+            if (argv[i] == elf_file) continue;  // skip ELF arg
+            new_argv.push_back(argv[i]);
+        }
+        new_argv.push_back(const_cast<char*>(plusarg.c_str()));
+        new_argv.push_back(nullptr);
+        execv(argv[0], new_argv.data());
+        // execv only returns on error
+        perror("execv");
+        unlink(hex_path.c_str());
+        return 1;
+    }
+
+    Vsoc_top *dut = new Vsoc_top;
 
     VerilatedFstC *tfp = nullptr;
     if (trace_en) {
@@ -174,9 +177,7 @@ int main(int argc, char **argv) {
     }
     dut->cpu_rst_n = 1; dut->xbar_rst_n = 1; dut->dev_rst_n = 1;
 
-    // --- Pre-load next_pc_q with reset vector ---
-    // The init=0x80000000 in the .tbn translates to an init_tokens value,
-    // but the FIFO needs actual data. Pre-load storage[0] with the reset PC.
+    // Pre-load next_pc_q with reset vector (the one remaining rootp poke)
     {
         auto &r = *dut->rootp;
         r.soc_top__DOT__marie_inst__DOT__q_CPUCore_next_pc_q_inst__DOT__storage[0] = 0x80000000;

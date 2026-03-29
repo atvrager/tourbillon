@@ -8,13 +8,15 @@
 #include <verilated.h>
 #include <verilated_fst_c.h>
 #include "Vtb_top.h"
-#include "Vtb_top___024root.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <string>
+#include <vector>
 #include <time.h>
+#include <unistd.h>
 
 // ---------------------------------------------------------------------------
 // Minimal ELF32 loader
@@ -77,98 +79,52 @@ static const uint32_t SHT_SYMTAB = 2;
 static const uint32_t SHT_STRTAB = 3;
 static const uint32_t MEM_BASE = 0x80000000;
 
-// Load an ELF file into memory arrays.
-// Returns the tohost address (0 if not found in symbol table).
-static uint32_t load_elf(const char *path, Vtb_top *dut) {
+/// Convert ELF to a temporary hex file for $readmemh loading.
+static std::string elf_to_hex(const char *path) {
     FILE *f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "[tb] Cannot open ELF: %s\n", path);
-        return 0;
-    }
+    if (!f) { fprintf(stderr, "[tb] Cannot open ELF: %s\n", path); return ""; }
 
-    // Read ELF header
     Elf32_Ehdr ehdr;
-    if (fread(&ehdr, sizeof(ehdr), 1, f) != 1) {
-        fprintf(stderr, "[tb] Failed to read ELF header\n");
-        fclose(f);
-        return 0;
-    }
+    if (fread(&ehdr, sizeof(ehdr), 1, f) != 1) { fclose(f); return ""; }
+    if (memcmp(ehdr.e_ident, "\x7f""ELF", 4) != 0) { fclose(f); return ""; }
 
-    // Check ELF magic
-    if (ehdr.e_ident[0] != 0x7f || ehdr.e_ident[1] != 'E' ||
-        ehdr.e_ident[2] != 'L'  || ehdr.e_ident[3] != 'F') {
-        fprintf(stderr, "[tb] Not an ELF file: %s\n", path);
-        fclose(f);
-        return 0;
-    }
-
-    // Load PT_LOAD segments
+    uint32_t mem[16384] = {};
+    uint32_t max_idx = 0;
     for (int i = 0; i < ehdr.e_phnum; i++) {
         Elf32_Phdr phdr;
         fseek(f, ehdr.e_phoff + i * ehdr.e_phentsize, SEEK_SET);
         if (fread(&phdr, sizeof(phdr), 1, f) != 1) continue;
-        if (phdr.p_type != PT_LOAD) continue;
-        if (phdr.p_filesz == 0) continue;
+        if (phdr.p_type != PT_LOAD || phdr.p_filesz == 0) continue;
 
-        // Read segment data
         uint8_t *buf = new uint8_t[phdr.p_filesz];
         fseek(f, phdr.p_offset, SEEK_SET);
         size_t nread = fread(buf, 1, phdr.p_filesz, f);
 
-        // Copy to memory word by word
-        uint32_t base = phdr.p_paddr;
         for (size_t j = 0; j < nread; j += 4) {
             uint32_t word = 0;
-            for (size_t k = 0; k < 4 && (j + k) < nread; k++) {
+            for (size_t k = 0; k < 4 && (j + k) < nread; k++)
                 word |= ((uint32_t)buf[j + k]) << (k * 8);
-            }
-            uint32_t addr = base + j;
+            uint32_t addr = phdr.p_paddr + j;
             if (addr >= MEM_BASE) {
                 uint32_t idx = (addr - MEM_BASE) >> 2;
                 if (idx < 16384) {
-                    dut->rootp->tb_top__DOT__imem__DOT__storage[idx] = word;
-                    dut->rootp->tb_top__DOT__dmem__DOT__storage[idx] = word;
+                    mem[idx] = word;
+                    if (idx > max_idx) max_idx = idx;
                 }
             }
         }
         delete[] buf;
     }
-
-    // Search symbol table for "tohost"
-    uint32_t tohost_addr = 0;
-    for (int i = 0; i < ehdr.e_shnum; i++) {
-        Elf32_Shdr shdr;
-        fseek(f, ehdr.e_shoff + i * ehdr.e_shentsize, SEEK_SET);
-        if (fread(&shdr, sizeof(shdr), 1, f) != 1) continue;
-        if (shdr.sh_type != SHT_SYMTAB) continue;
-
-        // Read associated string table
-        Elf32_Shdr strtab_shdr;
-        fseek(f, ehdr.e_shoff + shdr.sh_link * ehdr.e_shentsize, SEEK_SET);
-        if (fread(&strtab_shdr, sizeof(strtab_shdr), 1, f) != 1) continue;
-
-        char *strtab = new char[strtab_shdr.sh_size];
-        fseek(f, strtab_shdr.sh_offset, SEEK_SET);
-        fread(strtab, 1, strtab_shdr.sh_size, f);
-
-        // Search symbols
-        int nsyms = shdr.sh_size / shdr.sh_entsize;
-        for (int s = 0; s < nsyms; s++) {
-            Elf32_Sym sym;
-            fseek(f, shdr.sh_offset + s * shdr.sh_entsize, SEEK_SET);
-            if (fread(&sym, sizeof(sym), 1, f) != 1) continue;
-            if (sym.st_name < strtab_shdr.sh_size &&
-                strcmp(&strtab[sym.st_name], "tohost") == 0) {
-                tohost_addr = sym.st_value;
-                break;
-            }
-        }
-        delete[] strtab;
-        if (tohost_addr) break;
-    }
-
     fclose(f);
-    return tohost_addr;
+
+    char tmp[] = "/tmp/tbn_cpu_XXXXXX.hex";
+    int fd = mkstemps(tmp, 4);
+    if (fd < 0) { perror("mkstemps"); return ""; }
+    FILE *hf = fdopen(fd, "w");
+    for (uint32_t i = 0; i <= max_idx; i++)
+        fprintf(hf, "%08x\n", mem[i]);
+    fclose(hf);
+    return std::string(tmp);
 }
 
 // ---------------------------------------------------------------------------
@@ -199,13 +155,27 @@ int main(int argc, char **argv) {
         }
     }
 
+    // --- Convert ELF to hex and re-exec with +memfile= ---
+    if (elf_file) {
+        std::string hex_path = elf_to_hex(elf_file);
+        if (hex_path.empty()) return 1;
+
+        std::string plusarg = "+memfile=" + hex_path;
+        std::vector<char*> new_argv;
+        for (int i = 0; i < argc; i++) {
+            if (argv[i] == elf_file) continue;
+            new_argv.push_back(argv[i]);
+        }
+        new_argv.push_back(const_cast<char*>(plusarg.c_str()));
+        new_argv.push_back(nullptr);
+        execv(argv[0], new_argv.data());
+        perror("execv");
+        unlink(hex_path.c_str());
+        return 1;
+    }
+
     // --- Instantiate DUT ---
     Vtb_top *dut = new Vtb_top;
-
-    // --- Load ELF if provided ---
-    if (elf_file) {
-        load_elf(elf_file, dut);
-    }
 
     // --- VCD trace setup ---
     VerilatedFstC *tfp = nullptr;
@@ -229,15 +199,7 @@ int main(int argc, char **argv) {
     }
     dut->rst_n = 1;
 
-    // --- Pre-load done_q credit token ---
-    // The single-issue pipeline needs an initial credit in done_q.
-    // Must be done AFTER reset (which clears FIFO state).
-    {
-        auto &root = *dut->rootp;
-        root.tb_top__DOT__cpu_inst__DOT__q_done_q_inst__DOT__storage[0] = 1;
-        root.tb_top__DOT__cpu_inst__DOT__q_done_q_inst__DOT__wr_ptr = 1;
-        root.tb_top__DOT__cpu_inst__DOT__q_done_q_inst__DOT__count = 1;
-    }
+    // done_q preload is now handled in tb_top.sv initial block
 
     // --- Main simulation loop ---
     struct timespec ts_start, ts_end;

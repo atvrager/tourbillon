@@ -35,7 +35,7 @@ NPROC := $(shell nproc 2>/dev/null || echo 4)
 verilate: sv
 	$(VERILATOR) --cc --exe --build --trace-fst -Wall -Wno-fatal \
 		--top-module tb_top \
-		--public-flat-rw \
+		\
 		-j $(NPROC) \
 		-I$(SV_DIR) \
 		tb_top.sv rv32i_pkg.sv mem_model.sv \
