@@ -63,7 +63,7 @@ module Top (
     wire r_Source_go_can_fire = q_data_enq_ready;
     wire r_Source_go_will_fire = r_Source_go_can_fire;
 
-    wire r_Router_go_can_fire = q_data_deq_valid & q_hi_enq_ready & q_lo_enq_ready;
+    wire r_Router_go_can_fire = q_data_deq_valid;
     wire r_Router_go_will_fire = r_Router_go_can_fire;
 
     wire r_SinkHigh_go_can_fire = q_hi_deq_valid;

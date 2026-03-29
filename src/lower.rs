@@ -285,6 +285,19 @@ fn unaryop_sv(op: &UnaryOp) -> &'static str {
     }
 }
 
+/// Collect port names that are unconditionally `put()` in a rule.
+/// Only top-level puts count — puts inside if/match branches are conditional.
+fn collect_unconditional_puts(rule: &Rule) -> BTreeSet<String> {
+    let mut puts = BTreeSet::new();
+    for stmt in &rule.body {
+        if let Stmt::Put { target, .. } = &stmt.node {
+            puts.insert(target.node.clone());
+        }
+        // Don't recurse into if/match — those are conditional
+    }
+    puts
+}
+
 /// Collect port names that use blocking `take()` (not `try_take()`) in a rule.
 fn collect_blocking_takes(rule: &Rule) -> BTreeSet<String> {
     let mut takes = BTreeSet::new();
@@ -972,6 +985,8 @@ impl<'a> SvEmitter<'a> {
 
             let blocking_takes: Vec<BTreeSet<String>> =
                 node.rules.iter().map(collect_blocking_takes).collect();
+            let unconditional_puts: Vec<BTreeSet<String>> =
+                node.rules.iter().map(collect_unconditional_puts).collect();
 
             let mut higher_will_fires: Vec<String> = vec![];
 
@@ -997,8 +1012,11 @@ impl<'a> SvEmitter<'a> {
                         }
                     }
 
-                    // Puts on Queue/AsyncQueue edges require enq_ready
-                    for put_port in &schedule.rule_resources[rule_idx].puts {
+                    // Only unconditional puts require enq_ready in can_fire.
+                    // Conditional puts (inside if/match) are gated by branch
+                    // conditions in the always_comb block — enq_valid is only
+                    // asserted when the put actually fires.
+                    for put_port in &unconditional_puts[rule_idx] {
                         if let Some(&edge_idx) = port_edges.get(put_port) {
                             let edge = &self.net.network.graph[edge_idx];
                             if is_queue_like(&edge.kind) {

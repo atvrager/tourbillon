@@ -173,13 +173,14 @@ int main(int argc, char **argv) {
     }
     dut->cpu_rst_n = 1; dut->xbar_rst_n = 1; dut->dev_rst_n = 1;
 
-    // --- Pre-load done_q credit token ---
-    // Path: marie_inst → CPUCore child → done_q FIFO
+    // --- Pre-load next_pc_q with reset vector ---
+    // The init=0x80000000 in the .tbn translates to an init_tokens value,
+    // but the FIFO needs actual data. Pre-load storage[0] with the reset PC.
     {
         auto &r = *dut->rootp;
-        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_done_q_inst__DOT__storage[0] = 1;
-        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_done_q_inst__DOT__wr_ptr = 1;
-        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_done_q_inst__DOT__count = 1;
+        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_next_pc_q_inst__DOT__storage[0] = 0x80000000;
+        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_next_pc_q_inst__DOT__wr_ptr = 1;
+        r.soc_top__DOT__marie_inst__DOT__q_CPUCore_next_pc_q_inst__DOT__count = 1;
     }
 
     // --- Simulation ---

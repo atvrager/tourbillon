@@ -107,7 +107,13 @@ module soc_top (
 
     // -------------------------------------------------------------------------
     // Device data memory — dev domain clock
+    // The mem_model is combinational (rd_resp in same cycle as rd_req).
+    // The SoC's MemDevice reads the response one cycle later via try_take,
+    // so we register the response to hold data across cycles.
     // -------------------------------------------------------------------------
+    wire        dmem_raw_resp_valid;
+    wire [31:0] dmem_raw_resp_data;
+
     mem_model #(
         .DEPTH (16384)
     ) dmem (
@@ -116,13 +122,36 @@ module soc_top (
         .rd_req_valid  (dmem_rd_req_valid),
         .rd_req_ready  (dmem_rd_req_ready),
         .rd_req_data   (dmem_rd_req_data),
-        .rd_resp_valid (dmem_rd_resp_valid),
-        .rd_resp_ready (dmem_rd_resp_ready),
-        .rd_resp_data  (dmem_rd_resp_data),
+        .rd_resp_valid (dmem_raw_resp_valid),
+        .rd_resp_ready (1'b1),  // always consume from raw
+        .rd_resp_data  (dmem_raw_resp_data),
         .wr_req_valid  (dmem_wr_req_valid),
         .wr_req_ready  (dmem_wr_req_ready),
         .wr_req_data   (dmem_wr_req_data)
     );
+
+    // 1-cycle response queue: latch on valid request, hold until consumed
+    reg        dmem_resp_valid_q;
+    reg [31:0] dmem_resp_data_q;
+
+    assign dmem_rd_resp_valid = dmem_resp_valid_q;
+    assign dmem_rd_resp_data  = dmem_resp_data_q;
+
+    always_ff @(posedge dev_clk or negedge dev_rst_n) begin
+        if (!dev_rst_n) begin
+            dmem_resp_valid_q <= 1'b0;
+            dmem_resp_data_q  <= 32'd0;
+        end else begin
+            if (dmem_rd_req_valid && !dmem_resp_valid_q) begin
+                // Latch response on request
+                dmem_resp_valid_q <= 1'b1;
+                dmem_resp_data_q  <= dmem_raw_resp_data;
+            end else if (dmem_resp_valid_q && dmem_rd_resp_ready) begin
+                // Consumed by Marie
+                dmem_resp_valid_q <= 1'b0;
+            end
+        end
+    end
 
     // -------------------------------------------------------------------------
     // Memory loading via +memfile= plusarg (hex files)

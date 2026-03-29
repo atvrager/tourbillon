@@ -252,6 +252,21 @@ package rv32i_pkg;
   endfunction
 
   // -----------------------------------------------------------------------
+  // Compute next PC: branch target if taken, else pc+4
+  // -----------------------------------------------------------------------
+
+  function automatic [31:0] compute_next_pc(
+    input [6:0] opcode, input [2:0] funct3,
+    input [31:0] rs1_val, input [31:0] rs2_val,
+    input [31:0] imm, input [31:0] pc
+  );
+    if (is_taken(opcode, funct3, rs1_val, rs2_val))
+      return compute_branch_target(opcode, pc, rs1_val, imm);
+    else
+      return pc + 32'd4;
+  endfunction
+
+  // -----------------------------------------------------------------------
   // Sub-word load extension (LB, LH, LBU, LHU, LW)
   // -----------------------------------------------------------------------
 
