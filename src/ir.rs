@@ -36,7 +36,7 @@ pub struct ResolvedPort {
 }
 
 /// A queue (or cell) edge in the process network.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueueEdge {
     pub name: String,
     pub elem_ty: Ty,
@@ -46,7 +46,7 @@ pub struct QueueEdge {
 }
 
 /// Whether an edge is a regular queue or a cell (with possible cross-instance peekers).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum QueueEdgeKind {
     Queue,
     Cell {

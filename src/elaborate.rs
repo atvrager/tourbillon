@@ -105,7 +105,10 @@ fn resolve_queue_decl(
 
 /// Tracks a queue edge during wiring: who writes, who reads, and peek bindings.
 struct PendingEdge {
-    edge_idx: EdgeIndex,
+    /// Graph edge index — Some for self-loops (already in graph), None for deferred queue edges.
+    edge_idx: Option<EdgeIndex>,
+    /// The edge data, stored until we know both endpoints for queue edges.
+    edge_data: QueueEdge,
     writer: Option<(String, Span)>, // (instance_name, binding_span)
     reader: Option<(String, Span)>,
     decl_span: Span,
@@ -173,23 +176,14 @@ fn elaborate_pipe(
         return None;
     }
 
-    // Phase 3: Create queue edges and wire bindings
+    // Phase 3: Collect queue edge data (deferred — added to graph after wiring)
     let mut pending_edges: HashMap<String, PendingEdge> = HashMap::new();
 
-    // Create edges from queue declarations
-    // We use a placeholder (first node or a dummy) for initial edge creation,
-    // then fix up endpoints during wiring.
     for decl in &pipe.queue_decls {
         let (elem_ty, depth) = resolve_queue_decl(decl, type_env, diagnostics);
         let queue_name = decl.name.node.clone();
 
-        // Create a temporary self-loop on first node; endpoints get fixed in wiring
-        // We need both endpoints to create an edge in petgraph, so we use a sentinel approach:
-        // store the edge data separately and build the final graph edges after wiring.
-        // Actually, petgraph requires valid nodes. Let's create edges after we know endpoints.
-
-        // For now, just record the queue info; edges created after wiring analysis.
-        let edge = QueueEdge {
+        let edge_data = QueueEdge {
             name: queue_name.clone(),
             elem_ty,
             depth,
@@ -197,22 +191,17 @@ fn elaborate_pipe(
             span: decl.name.span.clone(),
         };
 
-        // We'll add the edge to the graph once we know writer and reader.
-        // Store the edge data temporarily.
-        // Use a sentinel — we'll create the real edge after wiring.
-        // For now, add a self-loop on an arbitrary node that we'll replace.
-        if let Some((&_, &first_node)) = instances.iter().next() {
-            let edge_idx = graph.add_edge(first_node, first_node, edge);
-            pending_edges.insert(
-                queue_name,
-                PendingEdge {
-                    edge_idx,
-                    writer: None,
-                    reader: None,
-                    decl_span: decl.name.span.clone(),
-                },
-            );
-        }
+        // Don't add to graph yet — we need both endpoints first.
+        pending_edges.insert(
+            queue_name,
+            PendingEdge {
+                edge_idx: None, // deferred
+                edge_data,
+                writer: None,
+                reader: None,
+                decl_span: decl.name.span.clone(),
+            },
+        );
     }
 
     // Phase 3a: Create implicit self-loop edges for all state ports first
@@ -256,11 +245,12 @@ fn elaborate_pipe(
                     span: port_def.name.span.clone(),
                 };
 
-                let edge_idx = graph.add_edge(node_idx, node_idx, edge);
+                let edge_idx = graph.add_edge(node_idx, node_idx, edge.clone());
                 pending_edges.insert(
                     self_loop_name,
                     PendingEdge {
-                        edge_idx,
+                        edge_idx: Some(edge_idx),
+                        edge_data: edge,
                         writer: Some((instance_name.clone(), port_def.name.span.clone())),
                         reader: Some((instance_name.clone(), port_def.name.span.clone())),
                         decl_span: port_def.name.span.clone(),
@@ -352,19 +342,21 @@ fn elaborate_pipe(
                 // Find or create the self-loop edge for that state port
                 let self_loop_name = format!("{ref_instance}.{ref_port}");
                 if let Some(pending) = pending_edges.get_mut(&self_loop_name) {
-                    // Add this instance as a peeker
-                    if let Some(edge) = graph.edge_weight_mut(pending.edge_idx)
-                        && let QueueEdgeKind::Cell {
-                            ref mut peeker_instances,
-                            ..
-                        } = edge.kind
-                    {
-                        peeker_instances.push(instance_name.clone());
-                    }
-                    // Bind port to edge
-                    let node = &mut graph[node_idx];
-                    if let Some(rp) = node.ports.iter_mut().find(|p| p.name == *port_name) {
-                        rp.bound_to = Some(pending.edge_idx);
+                    // Add this instance as a peeker on the self-loop cell edge
+                    if let Some(edge_idx) = pending.edge_idx {
+                        if let Some(edge) = graph.edge_weight_mut(edge_idx)
+                            && let QueueEdgeKind::Cell {
+                                ref mut peeker_instances,
+                                ..
+                            } = edge.kind
+                        {
+                            peeker_instances.push(instance_name.clone());
+                        }
+                        // Bind port to edge
+                        let node = &mut graph[node_idx];
+                        if let Some(rp) = node.ports.iter_mut().find(|p| p.name == *port_name) {
+                            rp.bound_to = Some(edge_idx);
+                        }
                     }
                 }
                 // If the self-loop hasn't been created yet (it will be in the implicit phase),
@@ -385,22 +377,20 @@ fn elaborate_pipe(
 
             // Type check: port element type must match queue element type
             let port_elem = port_element_type(&port_ty);
-            if let Some(ref port_elem) = port_elem {
-                let edge = &graph[pending.edge_idx];
-                if *port_elem != Ty::Error
-                    && edge.elem_ty != Ty::Error
-                    && *port_elem != edge.elem_ty
-                {
-                    diagnostics.push(Diagnostic::error(
-                        binding.target.span.clone(),
-                        format!(
-                            "type mismatch: port `{port_name}` has element type `{port_elem}` but queue `{target}` has element type `{}`",
-                            edge.elem_ty
-                        ),
-                    ));
-                    had_error = true;
-                    continue;
-                }
+            if let Some(ref port_elem) = port_elem
+                && *port_elem != Ty::Error
+                && pending.edge_data.elem_ty != Ty::Error
+                && *port_elem != pending.edge_data.elem_ty
+            {
+                diagnostics.push(Diagnostic::error(
+                    binding.target.span.clone(),
+                    format!(
+                        "type mismatch: port `{port_name}` has element type `{port_elem}` but queue `{target}` has element type `{}`",
+                        pending.edge_data.elem_ty
+                    ),
+                ));
+                had_error = true;
+                continue;
             }
 
             // Record writer/reader based on port kind
@@ -442,28 +432,94 @@ fn elaborate_pipe(
                 }
                 PortKind::Peeks => {
                     // Peek doesn't count as reader — just add to peekers
-                    if let Some(edge) = graph.edge_weight_mut(pending.edge_idx)
-                        && let QueueEdgeKind::Cell {
+                    if let Some(edge_idx) = pending.edge_idx {
+                        if let Some(edge) = graph.edge_weight_mut(edge_idx)
+                            && let QueueEdgeKind::Cell {
+                                ref mut peeker_instances,
+                                ..
+                            } = edge.kind
+                        {
+                            peeker_instances.push(instance_name.clone());
+                        }
+                    } else {
+                        // For deferred queue edges, record peeker in edge_data
+                        if let QueueEdgeKind::Cell {
                             ref mut peeker_instances,
                             ..
-                        } = edge.kind
-                    {
-                        peeker_instances.push(instance_name.clone());
+                        } = pending.edge_data.kind
+                        {
+                            peeker_instances.push(instance_name.clone());
+                        }
                     }
                 }
             }
 
-            // Bind the port to the edge
-            let node = &mut graph[node_idx];
-            if let Some(rp) = node.ports.iter_mut().find(|p| p.name == *port_name) {
-                rp.bound_to = Some(pending.edge_idx);
+            // Bind the port to the edge (deferred for queue edges — stored as port name → queue name)
+            if let Some(edge_idx) = pending.edge_idx {
+                // Self-loop or already-created edge — bind immediately
+                let node = &mut graph[node_idx];
+                if let Some(rp) = node.ports.iter_mut().find(|p| p.name == *port_name) {
+                    rp.bound_to = Some(edge_idx);
+                }
             }
+            // For deferred queue edges (edge_idx == None), we record the binding
+            // and resolve it after edges are created. Store in a deferred list.
+            let _ = (&instance_name, port_name, target); // used below in deferred binding
         }
 
         // (Implicit self-loops already created in Phase 3a above)
     }
 
-    // Phase 4: Validate
+    // Phase 4: Create deferred queue edges + bind ports, then validate.
+
+    // Create deferred queue edges now that we know writers and readers.
+    // Iterate in pipe declaration order for deterministic output.
+    let mut queue_edge_map: HashMap<String, EdgeIndex> = HashMap::new();
+    for decl in &pipe.queue_decls {
+        let queue_name = &decl.name.node;
+        let Some(pending) = pending_edges.get(queue_name) else {
+            continue;
+        };
+        if pending.edge_idx.is_some() {
+            continue; // Already in graph (shouldn't happen for queue decls)
+        }
+        if let (Some((writer, _)), Some((reader, _))) = (&pending.writer, &pending.reader)
+            && let (Some(&src_node), Some(&dst_node)) =
+                (instances.get(writer), instances.get(reader))
+        {
+            let edge_idx = graph.add_edge(src_node, dst_node, pending.edge_data.clone());
+            queue_edge_map.insert(queue_name.clone(), edge_idx);
+        }
+    }
+
+    // Bind deferred port bindings for queue edges.
+    for (idx, inst) in pipe.instances.iter().enumerate() {
+        let proc_name = &inst.process_name.node;
+        let instance_name = find_instance_name(&instances, proc_name, idx);
+        let Some(instance_name) = instance_name else {
+            continue;
+        };
+        let node_idx = instances[&instance_name];
+
+        for binding in &inst.bindings {
+            let port_name = &binding.port.node;
+            let target = &binding.target.node;
+
+            // Skip dotted references (already bound in Phase 3b)
+            if target.contains('.') {
+                continue;
+            }
+
+            if let Some(&edge_idx) = queue_edge_map.get(target) {
+                let node = &mut graph[node_idx];
+                if let Some(rp) = node.ports.iter_mut().find(|p| p.name == *port_name)
+                    && rp.bound_to.is_none()
+                {
+                    rp.bound_to = Some(edge_idx);
+                }
+            }
+        }
+    }
 
     // Check all consumes/produces ports are bound
     for (idx, inst) in pipe.instances.iter().enumerate() {
@@ -512,56 +568,6 @@ fn elaborate_pipe(
                 format!("queue `{queue_name}` has no reader"),
             ));
             had_error = true;
-        }
-    }
-
-    // Fix up edge endpoints now that we know writers and readers.
-    //
-    // petgraph uses swap_remove internally, so removing edges one-at-a-time
-    // causes index reuse that corrupts later lookups. Instead: collect all
-    // edges to relocate, remove them all first, then re-add in batch.
-    let mut to_relocate: Vec<(EdgeIndex, NodeIndex, NodeIndex, EdgeIndex)> = vec![];
-    for (queue_name, pending) in &pending_edges {
-        if queue_name.contains('.') {
-            continue; // Self-loops already have correct endpoints
-        }
-        if let (Some((writer, _)), Some((reader, _))) = (&pending.writer, &pending.reader)
-            && let (Some(&src_node), Some(&dst_node)) =
-                (instances.get(writer), instances.get(reader))
-        {
-            to_relocate.push((pending.edge_idx, src_node, dst_node, pending.edge_idx));
-        }
-    }
-
-    // Sort by edge index descending so removals don't shift earlier indices
-    // (petgraph swaps the last edge into the removed slot).
-    to_relocate.sort_by(|a, b| b.0.cmp(&a.0));
-
-    // Remove all, collecting edge data
-    let mut removed: Vec<(QueueEdge, NodeIndex, NodeIndex, EdgeIndex)> = vec![];
-    for (edge_idx, src_node, dst_node, old_idx) in &to_relocate {
-        if let Some(edge_data) = graph.remove_edge(*edge_idx) {
-            removed.push((edge_data, *src_node, *dst_node, *old_idx));
-        }
-    }
-
-    // Re-add with correct endpoints, building old→new index map
-    let mut index_map: HashMap<EdgeIndex, EdgeIndex> = HashMap::new();
-    for (edge_data, src_node, dst_node, old_idx) in removed {
-        let new_idx = graph.add_edge(src_node, dst_node, edge_data);
-        index_map.insert(old_idx, new_idx);
-    }
-
-    // Apply index mapping to all port bindings in a single pass
-    // (avoids collisions from incremental updates)
-    for node_idx in graph.node_indices().collect::<Vec<_>>() {
-        let node = &mut graph[node_idx];
-        for port in &mut node.ports {
-            if let Some(old) = port.bound_to
-                && let Some(&new) = index_map.get(&old)
-            {
-                port.bound_to = Some(new);
-            }
         }
     }
 

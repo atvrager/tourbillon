@@ -168,6 +168,21 @@ package rv32i_pkg;
   // Branch helpers
   // -----------------------------------------------------------------------
 
+  // Decode MemOp: 0=Load, 1=Store, 2=None (matches Tourbillon enum encoding)
+  function automatic [1:0] decode_mem_op(input [6:0] opcode);
+    if (opcode == OP_LOAD)
+      return 2'd0;  // Load
+    else if (opcode == OP_STORE)
+      return 2'd1;  // Store
+    else
+      return 2'd2;  // None
+  endfunction
+
+  // Decode needs_wb: true for all except STORE and BRANCH
+  function automatic decode_needs_wb(input [6:0] opcode);
+    return (opcode != OP_STORE) && (opcode != OP_BRANCH);
+  endfunction
+
   function automatic is_branch(input [6:0] opcode);
     return (opcode == OP_BRANCH);
   endfunction
