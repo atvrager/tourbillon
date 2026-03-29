@@ -188,7 +188,9 @@ fn elaborate_pipe(
             name: queue_name.clone(),
             elem_ty,
             depth,
-            kind: QueueEdgeKind::Queue,
+            kind: QueueEdgeKind::Queue {
+                init_tokens: decl.init_tokens.unwrap_or(0),
+            },
             span: decl.name.span.clone(),
         };
 

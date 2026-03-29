@@ -31,6 +31,12 @@ enum Command {
         #[arg(required = true)]
         files: Vec<PathBuf>,
     },
+    /// Emit process network as Graphviz DOT
+    Graph {
+        /// Input .tbn file(s)
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
     /// Remove the build cache (~/.tbn/store/)
     Clean,
 }
@@ -129,6 +135,24 @@ fn main() {
                 println!("cache: {} (exists)", cache.display());
             } else {
                 println!("cache: {} (not found)", cache.display());
+            }
+        }
+        Command::Graph { files } => {
+            for path in &files {
+                match std::fs::read_to_string(path) {
+                    Ok(src) => match tbn::emit_graph(&src, path.to_string_lossy().as_ref()) {
+                        Ok(dots) => {
+                            for dot in dots {
+                                print!("{dot}");
+                            }
+                        }
+                        Err(_) => std::process::exit(1),
+                    },
+                    Err(e) => {
+                        eprintln!("error: {}: {e}", path.display());
+                        std::process::exit(1);
+                    }
+                }
             }
         }
         Command::Clean => {

@@ -692,8 +692,20 @@ where
                 .ignore_then(select! { Token::Int(n) => n })
                 .or_not(),
         )
+        .then(
+            just(Token::Comma)
+                .ignore_then(just(Token::Init))
+                .ignore_then(just(Token::Assign))
+                .ignore_then(select! { Token::Int(n) => n })
+                .or_not(),
+        )
         .then_ignore(just(Token::RParen))
-        .map(|((name, ty), depth)| QueueDecl { name, ty, depth });
+        .map(|(((name, ty), depth), init_tokens)| QueueDecl {
+            name,
+            ty,
+            depth,
+            init_tokens,
+        });
 
     // Memory(K → V, depth = N, latency = M)
     let memory_decl = just(Token::Let)

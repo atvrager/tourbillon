@@ -15,6 +15,8 @@ use crate::ir::ProcessNetwork;
 pub struct RuleResources {
     /// Ports accessed via take() or try_take() — mutable.
     pub takes: BTreeSet<String>,
+    /// Ports accessed via try_take() only (subset of takes, non-blocking).
+    pub try_takes: BTreeSet<String>,
     /// Ports accessed via put() — mutable.
     pub puts: BTreeSet<String>,
     /// Ports accessed via peek() — read-only, non-conflicting.
@@ -27,6 +29,7 @@ impl RuleResources {
     fn new() -> Self {
         Self {
             takes: BTreeSet::new(),
+            try_takes: BTreeSet::new(),
             puts: BTreeSet::new(),
             peeks: BTreeSet::new(),
             mutable_edges: BTreeSet::new(),
@@ -178,6 +181,7 @@ fn collect_expr_resources(
         }
         Expr::TryTake { queue } => {
             resources.takes.insert(queue.clone());
+            resources.try_takes.insert(queue.clone());
             if let Some(&edge) = port_map.get(queue) {
                 resources.mutable_edges.insert(edge);
             }

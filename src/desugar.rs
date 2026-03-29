@@ -164,6 +164,7 @@ fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
             span.clone(),
         ),
         depth: Some(1),
+        init_tokens: None,
     };
 
     let read_resp = QueueDecl {
@@ -176,6 +177,7 @@ fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
             span.clone(),
         ),
         depth: Some(1),
+        init_tokens: None,
     };
 
     let write_req = QueueDecl {
@@ -191,6 +193,7 @@ fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
             span.clone(),
         ),
         depth: Some(1),
+        init_tokens: None,
     };
 
     // Internal latency-modeling process:

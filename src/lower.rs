@@ -342,7 +342,7 @@ pub fn lower(scheduled: &[ScheduledNetwork], provenance: Option<[u8; 32]>) -> Ve
         sn.network
             .graph
             .edge_weights()
-            .any(|e| matches!(e.kind, QueueEdgeKind::Queue))
+            .any(|e| matches!(e.kind, QueueEdgeKind::Queue { .. }))
     });
 
     if has_queues {
@@ -594,7 +594,7 @@ impl<'a> SvEmitter<'a> {
     fn emit_queue_instances(&mut self) {
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
-            if !matches!(edge.kind, QueueEdgeKind::Queue) {
+            if !matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
                 continue;
             }
             // Skip memory-exposed edges — no FIFO, signals are module ports
@@ -716,7 +716,7 @@ impl<'a> SvEmitter<'a> {
                     for take_port in &blocking_takes[rule_idx] {
                         if let Some(&edge_idx) = port_edges.get(take_port) {
                             let edge = &self.net.network.graph[edge_idx];
-                            if matches!(edge.kind, QueueEdgeKind::Queue) {
+                            if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
                                 conditions.push(format!("q_{}_deq_valid", sanitize(&edge.name)));
                             }
                         }
@@ -726,7 +726,7 @@ impl<'a> SvEmitter<'a> {
                     for put_port in &schedule.rule_resources[rule_idx].puts {
                         if let Some(&edge_idx) = port_edges.get(put_port) {
                             let edge = &self.net.network.graph[edge_idx];
-                            if matches!(edge.kind, QueueEdgeKind::Queue) {
+                            if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
                                 conditions.push(format!("q_{}_enq_ready", sanitize(&edge.name)));
                             }
                         }
@@ -782,7 +782,7 @@ impl<'a> SvEmitter<'a> {
             .network
             .graph
             .edge_weights()
-            .any(|e| matches!(e.kind, QueueEdgeKind::Queue));
+            .any(|e| matches!(e.kind, QueueEdgeKind::Queue { .. }));
         let has_rules = self
             .net
             .network
@@ -810,7 +810,7 @@ impl<'a> SvEmitter<'a> {
         // Default Queue enq signals (skip dead-side memory edges)
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
-            if matches!(edge.kind, QueueEdgeKind::Queue) {
+            if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
                 // For memory edges where CPU is reader, enq side is dead (no stub to drive it)
                 if let Some(&cpu_is_writer) = self.memory_edges.get(&edge_idx)
                     && !cpu_is_writer
@@ -905,7 +905,7 @@ impl<'a> SvEmitter<'a> {
                 for port_name in &blocking {
                     if let Some(&edge_idx) = port_edges.get(port_name) {
                         let edge = &self.net.network.graph[edge_idx];
-                        if matches!(edge.kind, QueueEdgeKind::Queue) {
+                        if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
                             deq_ready_drivers
                                 .entry(edge_idx)
                                 .or_default()
@@ -919,7 +919,7 @@ impl<'a> SvEmitter<'a> {
                 for port_name in &try_takes {
                     if let Some(&edge_idx) = port_edges.get(port_name) {
                         let edge = &self.net.network.graph[edge_idx];
-                        if matches!(edge.kind, QueueEdgeKind::Queue) {
+                        if matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
                             let sname = sanitize(&edge.name);
                             deq_ready_drivers.entry(edge_idx).or_default().push(format!(
                                 "(r_{inst}_{rule_name}_will_fire & q_{sname}_deq_valid)"
@@ -933,7 +933,7 @@ impl<'a> SvEmitter<'a> {
         // Emit assign for each queue's deq_ready
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
-            if !matches!(edge.kind, QueueEdgeKind::Queue) {
+            if !matches!(edge.kind, QueueEdgeKind::Queue { .. }) {
                 continue;
             }
             // Skip memory edges where CPU is writer — deq side is dead
@@ -958,7 +958,7 @@ impl<'a> SvEmitter<'a> {
             .network
             .graph
             .edge_weights()
-            .any(|e| matches!(e.kind, QueueEdgeKind::Queue))
+            .any(|e| matches!(e.kind, QueueEdgeKind::Queue { .. }))
         {
             self.blank();
         }
@@ -1032,7 +1032,7 @@ impl<'a> SvEmitter<'a> {
                             self.line(&format!("c_{sname}_d = {val_sv};"));
                             self.line(&format!("c_{sname}_en = 1'b1;"));
                         }
-                        QueueEdgeKind::Queue => {
+                        QueueEdgeKind::Queue { .. } => {
                             self.line(&format!("q_{sname}_enq_data = {val_sv};"));
                             self.line(&format!("q_{sname}_enq_valid = 1'b1;"));
                         }
@@ -1107,7 +1107,7 @@ impl<'a> SvEmitter<'a> {
                     let sname = sanitize(&edge.name);
                     match &edge.kind {
                         QueueEdgeKind::Cell { .. } => format!("c_{sname}_q"),
-                        QueueEdgeKind::Queue => format!("q_{sname}_deq_data"),
+                        QueueEdgeKind::Queue { .. } => format!("q_{sname}_deq_data"),
                     }
                 } else {
                     format!("/* unknown port {queue} */ '0")

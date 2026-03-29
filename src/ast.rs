@@ -283,6 +283,9 @@ pub struct QueueDecl {
     pub name: Spanned<String>,
     pub ty: Spanned<TypeExpr>,
     pub depth: Option<u64>,
+    /// Number of initial tokens pre-loaded at reset.
+    /// `init = N` in pipe declarations; enables deadlock-free cycles.
+    pub init_tokens: Option<u64>,
 }
 
 /// Memory(K → V, depth = N, latency = M) declaration in a pipe.

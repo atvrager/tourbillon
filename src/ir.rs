@@ -51,7 +51,10 @@ pub struct QueueEdge {
 /// Whether an edge is a regular queue or a cell (with possible cross-instance peekers).
 #[derive(Debug, Clone)]
 pub enum QueueEdgeKind {
-    Queue,
+    Queue {
+        /// Number of initial tokens pre-loaded at reset (from `init = N`).
+        init_tokens: u64,
+    },
     Cell {
         peeker_instances: Vec<String>,
         init: Option<u64>,

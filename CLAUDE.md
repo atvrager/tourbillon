@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0–2 complete. Phase 2.4 (rv32ui compliance) complete: 38/38 rv32ui-p tests pass. Indexed cell ports (`regs[32] : Cell(Word)`) implemented in desugar. Single-issue pipeline with done_q credit token. Instruction bug fixes (LUI, AUIPC, JAL/JALR return addresses, R-type rs2, sub-word loads/stores, x0 guard). ELF loader in tb_cpu.cpp. Custom riscv-tests env (no CSR). `TOURBILLON.md` is the authoritative specification.
+**Status:** Phase 0–3 complete. Phase 2.4 (rv32ui compliance) complete: 38/38 rv32ui-p tests pass. Phase 3 (static deadlock analysis + DOT graph export) complete: SCC-based token/capacity checks, try_take relaxation, `tbn graph` subcommand. Indexed cell ports (`regs[32] : Cell(Word)`) implemented in desugar. Single-issue pipeline with done_q credit token. Instruction bug fixes (LUI, AUIPC, JAL/JALR return addresses, R-type rs2, sub-word loads/stores, x0 guard). ELF loader in tb_cpu.cpp. Custom riscv-tests env (no CSR). `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -27,8 +27,9 @@ cargo fmt --check              # Check formatting
 
 CLI usage:
 ```
-tbn check <file.tbn>           # Type-check and deadlock analysis (no codegen)
+tbn check <file.tbn>           # Type-check, deadlock analysis (no codegen)
 tbn build <file.tbn> -o <dir>  # Compile to SystemVerilog (.sv files)
+tbn graph <file.tbn>           # Emit process network as Graphviz DOT
 tbn status <file.tbn>          # Show provenance hash and cache status
 tbn clean                      # Remove build cache (~/.tbn/store/)
 ```
@@ -53,15 +54,16 @@ Tourbillon has exactly three constructs:
 - **Multi-producer arbitration** — `priority = [...]` or `arbitration = round_robin` on queues. Desugars to compiler-generated arbiter process.
 - **Async sources** — `source = async` annotation for external inputs (interrupts, bus interfaces). Compiler generates synchroniser.
 
-### Compiler Pipeline (7 stages)
+### Compiler Pipeline (8 stages)
 
 1. **Parse** → CST (chumsky)
 2. **Desugar** → Cells to depth-1 Queues; pattern match to decision trees
 3. **Type Check** → Hindley-Milner + linear-type discipline on Cells (peek exempt from linearity)
 4. **Elaborate** → Resolve pipes, flatten hierarchy, build process network graph
 5. **Schedule** → Rule priority assignment, conflict detection, shared-Cell arbitration
-6. **Lower** → Process network → structural SystemVerilog (Queue→FIFO module, Cell→reg, rule→always_comb)
-7. **Provenance** → BLAKE3 Merkle tree of sources, hash embedded in SV output
+6. **Deadlock** → SCC-based token check, KPN capacity analysis, try_take relaxation (warnings only)
+7. **Lower** → Process network → structural SystemVerilog (Queue→FIFO module, Cell→reg, rule→always_comb)
+8. **Provenance** → BLAKE3 Merkle tree of sources, hash embedded in SV output
 
 ### Core IR
 
@@ -89,12 +91,14 @@ This graph enables deadlock analysis (Petri net / KPN capacity checks), rule con
 
 ```
 src/
-  main.rs            -- CLI (clap): tbn check / tbn build
+  main.rs            -- CLI (clap): tbn check / tbn build / tbn graph
   lib.rs             -- Pipeline: parse → desugar → type-check → elaborate → schedule → lower
   ast.rs             -- AST types (Spanned nodes, all language constructs)
   ir.rs              -- IR types: ProcessNetwork, ProcessNode (is_memory_stub), QueueEdge, ResolvedPort
   elaborate.rs       -- Elaboration pass: AST pipes → petgraph process networks
-  schedule.rs        -- Rule priority assignment, conflict detection
+  schedule.rs        -- Rule priority assignment, conflict detection, try_take classification
+  deadlock.rs        -- Static deadlock analysis: SCC token check, KPN capacity, try_take relaxation
+  graph.rs           -- DOT graph export for process networks
   lower.rs           -- SV emitter: process network → SystemVerilog
   provenance.rs      -- BLAKE3 hashing, source manifest, cache helpers
   parse/
@@ -118,6 +122,7 @@ tests/
   schedule.rs        -- Schedule integration tests
   lower.rs           -- Lowering / SV codegen integration tests
   provenance.rs      -- Provenance hashing and embedding tests
+  deadlock.rs        -- Deadlock analysis + DOT graph integration tests
   riscv_tests.rs     -- rv32ui compliance: build sim + run 38 tests via Verilator
 examples/
   rv32i.tbn          -- RV32I reference core (4-stage pipeline)

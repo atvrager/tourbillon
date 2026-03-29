@@ -202,8 +202,8 @@ pipe CPU {
     let redir_q  = Queue(Addr, depth = 1)
     let wb_q     = Queue(Bool × RegIdx × Word, depth = 1)
 
-    -- Single-issue credit token (pre-loaded from testbench)
-    let done_q   = Queue(Bool, depth = 1)
+    -- Single-issue credit token: one token pre-loaded at reset
+    let done_q   = Queue(Bool, depth = 1, init = 1)
 
     -- Memory interfaces (desugared to req/resp queues)
     let imem = Memory(Addr -> Word, depth = 4096, latency = 1)
