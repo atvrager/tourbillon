@@ -222,6 +222,71 @@ Because all queues are bounded and the connectivity graph is known at compile ti
 
 This maps directly onto the capacity analysis from Kahn Process Network theory, and onto the marking-based liveness checks from Petri net analysis.
 
+### 2.6 Constants
+
+Named compile-time integer constants, substituted inline during type checking:
+
+```
+const MEM_REGION  = 0x8
+const UART_BASE   = 0x1000_0000
+```
+
+Emitted as `localparam` in generated SystemVerilog. Supports decimal and hexadecimal literals with underscores.
+
+### 2.7 Bit Slicing
+
+Extract a contiguous range of bits from a `Bits N` value:
+
+```
+let region = addr[31:28]    -- 4-bit result (Bits 4)
+let byte   = data[7:0]     -- 8-bit result (Bits 8)
+```
+
+Result type is `Bits(hi - lo + 1)`. `hi` and `lo` must be integer literals. Parser disambiguates from array index `[expr]` via look-ahead for `[int : int]`.
+
+### 2.8 External Functions (DPI)
+
+Declare external functions implemented in SystemVerilog or C/C++ (via DPI):
+
+```
+external fn uart_tx(ch : Bits 8)
+external fn read_sensor() -> Bits 16
+```
+
+The compiler registers the signature for call-site type checking and emits `import "DPI-C" function ...` in the generated SV preamble. Type mapping: `Bits 8` → `byte unsigned`, `Bits 32` → `int unsigned`, `Bool` → `bit`.
+
+### 2.9 Pipe Hierarchy
+
+Pipes can instantiate other pipes, enabling modular composition:
+
+```
+pipe CPUCore {
+    let dmem_rd_req = Queue(Addr, depth = 1)
+    -- ... internal processes and queues ...
+}
+
+pipe SoC {
+    let bus_req = Queue(Addr, depth = 2)
+    CPUCore [cpu] { dmem_rd_req = bus_req }
+    BusAdapter [cpu] { input = bus_req }
+}
+```
+
+The child pipe's process network is recursively elaborated and merged into the parent's graph. Queue bindings in the instantiation perform **cross-pipe queue wiring**: the child's internal queue is replaced by the parent's queue. Queues with no reader or writer in the child become **pipe ports** — the missing endpoint is provided by the parent. Dead (unreferenced) edges from substituted child queues are pruned from the graph.
+
+### 2.10 The Marie Antoinette SoC
+
+`examples/marie.tbn` — a multi-clock-domain SoC that exercises every language feature:
+
+- **3 clock domains**: cpu, xbar, dev — with AsyncQueue CDC FIFOs
+- **RV32I CPU** via pipe hierarchy (`CPUCore` pipe with exposed dmem ports)
+- **Bus fabric**: CpuDmemAdapter → Xbar (1→2 address-decoded router) → MemDevice + UartDevice
+- **Non-speculative pipeline**: next_pc queue replaces branch prediction; Execute always sends correct next PC after full instruction completion
+- **Split-phase processes**: all bus fabric processes use `try_take` polling for CDC-tolerant multi-cycle operations
+- **DPI UART**: `external fn uart_tx(ch : Bits 8)` prints characters via Verilator DPI
+
+Simulation: `make -C sim soc-hello` prints "Hello, World!" through the full bus fabric.
+
 ---
 
 ## 3. The RV32I Reference Design
@@ -577,15 +642,15 @@ Because the lowering from Tourbillon IR to SystemVerilog is mechanical and struc
 ## 7. CLI Reference
 
 ```
-tbn build [--target <fpga>]     Compile .tbn → SystemVerilog, populate cache
-tbn check                       Type-check and deadlock-analyse without codegen
-tbn status                      Show hash status: source vs build vs FPGA
-tbn verify <port>               Read provenance from FPGA, compare to source
-tbn graph                       Emit process network as DOT / Mermaid
-tbn export-mcrl2                Export process network for mCRL2 model checking
-tbn clean                       Purge build cache
-tbn init <name>                 Scaffold a new Tourbillon project
+tbn build <file.tbn> -o <dir>   Compile .tbn → SystemVerilog, populate cache
+tbn check <file.tbn>            Type-check and deadlock-analyse without codegen
+tbn graph <file.tbn>            Emit process network as Graphviz DOT
+tbn wave <file.fst> [-f pat]    Read FST waveform trace (Verilator debug)
+tbn status <file.tbn>           Show provenance hash and cache status
+tbn clean                       Purge build cache (~/.tbn/store/)
 ```
+
+The `wave` subcommand reads Verilator FST trace files for debugging multi-clock simulations. Supports `-l` (list signals), `-f` (filter by name), `--from`/`--to` (time range), and automatic hex formatting for wide signals.
 
 ---
 
@@ -610,9 +675,10 @@ tbn init <name>                 Scaffold a new Tourbillon project
 | **0 — Bootstrap** | Parser + type checker + Cell linearity | Core language compiles, no SV output | **Complete** — lexer, parser, desugaring, type checker, linearity checker |
 | **1 — Codegen** | SV emitter + FIFO library + provenance embedding | End-to-end flow: `.tbn` → `.sv` | **Complete** — All 7 stages implemented; `tbn build` produces provenance-tagged SV |
 | **2 — RV32I** | Reference core passes simulation (verilator) | Proves the language works for real hardware | **Complete** — 38/38 rv32ui-p tests pass |
-| **3 — Verify** | `tbn status` / `tbn verify` over UART/JTAG | Provenance chain to running FPGA | Planned |
-| **4 — Formal** | mCRL2 export + deadlock checker | Verification story | Planned |
-| **5 — Session** | Protocol types on queue interfaces | Advanced type system | Planned |
+| **3 — Deadlock** | SCC-based token check + KPN capacity analysis | Static deadlock detection | **Complete** — `tbn graph` DOT export |
+| **4 — Marie SoC** | Multi-clock SoC: CPU + bus fabric + UART | Exercises const, bit slice, DPI, pipe hierarchy, CDC | **Complete** — Hello World prints via 3-domain bus fabric |
+| **5 — Formal** | mCRL2 export + model checking | Verification story | Planned |
+| **6 — Session** | Protocol types on queue interfaces | Advanced type system | Planned |
 
 ### Phase 2 Sub-Stages
 
@@ -633,6 +699,19 @@ tbn init <name>                 Scaffold a new Tourbillon project
 | **2.3** | First instruction execution — smoke test passes under Verilator | **Complete** — Memory stubs exposed as module ports; behavioral SRAM models; array index codegen fix; smoke test PASS (23 cycles) |
 | **2.4** | riscv-tests rv32ui compliance | **Complete** — 38/38 rv32ui-p tests pass (fence_i skipped). Single-issue pipeline (~4 CPI) with done_q credit token. Instruction fixes: compute_result (LUI/AUIPC/JAL/JALR/R-type), branch targets, sub-word loads/stores, x0 guard. ELF loader, custom no-CSR test env, `cargo test` integration. Indexed cell ports (`regs[32] : Cell(T)`) implemented in desugar as language extension. |
 | **2.5** | Golden SV tests, CI integration, documentation updates | Planned |
+
+### Phase 4 Sub-Stages (Marie Antoinette SoC)
+
+| Sub-stage | Deliverable | Status |
+|---|---|---|
+| **4.1** | `const`, `expr[hi:lo]`, `external fn` language features | **Complete** |
+| **4.2** | Pipe hierarchy with cross-pipe queue wiring | **Complete** |
+| **4.3** | `tbn wave` FST trace reader for simulation debug | **Complete** |
+| **4.4** | Split-phase processes for CDC-tolerant bus fabric | **Complete** |
+| **4.5** | Conditional put/take guard fix (can_fire correctness) | **Complete** |
+| **4.6** | try_take deq_ready fix (always_comb-driven) | **Complete** |
+| **4.7** | Non-speculative CPU (next_pc queue, no branch prediction) | **Complete** |
+| **4.8** | Hello World: `make -C sim soc-hello` prints via UART DPI | **Complete** — PASS after 736 cycles |
 
 ---
 

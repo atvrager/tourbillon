@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0–3 complete. Marie Antoinette SoC (Phase 4) in progress. New compiler features: `const NAME = value` (compile-time constants, emitted as localparam), `expr[hi:lo]` (bit slicing), `external fn` (DPI function signatures with import "DPI-C" emission), pipe hierarchy (pipe-in-pipe instantiation with cross-pipe queue wiring). Phase 2.4 (rv32ui compliance) complete: 38/38 rv32ui-p tests pass. Phase 3 (static deadlock analysis + DOT graph export) complete: SCC-based token/capacity checks, try_take relaxation, `tbn graph` subcommand. AsyncQueue CDC primitive: `domain fast : Clock`, `AsyncQueue(T, depth=N)`, instance domain annotations `[domain]`, gray-code async FIFO SV generation, cross-domain validation, per-domain clock/reset ports. Indexed cell ports (`regs[32] : Cell(Word)`) implemented in desugar. Single-issue pipeline with done_q credit token. Instruction bug fixes (LUI, AUIPC, JAL/JALR return addresses, R-type rs2, sub-word loads/stores, x0 guard). ELF loader in tb_cpu.cpp. Custom riscv-tests env (no CSR). `TOURBILLON.md` is the authoritative specification.
+**Status:** Marie Antoinette SoC complete — Hello World prints via UART through 3-clock-domain bus fabric. Phase 0–3 complete. rv32ui compliance: 38/38 tests pass. Compiler features: `const` (localparam), `expr[hi:lo]` (bit slicing), `external fn` (DPI), pipe hierarchy with cross-pipe queue wiring, `tbn wave` (FST trace reader). CDC: AsyncQueue gray-code FIFO, domain annotations, cross-domain validation. Split-phase processes for CDC-tolerant bus fabric. Conditional put/take guard analysis (can_fire only requires unconditional operations). `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -30,6 +30,7 @@ CLI usage:
 tbn check <file.tbn>           # Type-check, deadlock analysis (no codegen)
 tbn build <file.tbn> -o <dir>  # Compile to SystemVerilog (.sv files)
 tbn graph <file.tbn>           # Emit process network as Graphviz DOT
+tbn wave <file.fst>            # Read FST waveform trace (Verilator debug)
 tbn status <file.tbn>          # Show provenance hash and cache status
 tbn clean                      # Remove build cache (~/.tbn/store/)
 ```
@@ -54,6 +55,10 @@ Tourbillon has exactly three constructs:
 - **Multi-producer arbitration** — `priority = [...]` or `arbitration = round_robin` on queues. Desugars to compiler-generated arbiter process.
 - **AsyncQueue(T, depth=N)** — clock domain crossing FIFO. Gray-code async FIFO in SV. Depth must be power of 2. Pipe-level `domain <name> : Clock` declarations, instances annotated with `[domain_name]`. Compiler enforces: sync Queue cannot cross domains, AsyncQueue must cross domains, Cell peek cannot cross domains.
 - **Async sources** — `source = async` annotation for external inputs (interrupts, bus interfaces). Compiler generates synchroniser.
+- **Constants** — `const NAME = value`. Named compile-time integer constants. Emitted as `localparam` in SV, inlined as literal values in expressions.
+- **Bit slicing** — `expr[hi:lo]`. Extract bits from a `Bits N` value. Result type is `Bits(hi - lo + 1)`. Parser disambiguates from array index via `[int:int]` look-ahead.
+- **External functions** — `external fn name(params) [-> RetTy]`. DPI function declarations. Emitted as `import "DPI-C"` in SV. Call-site type checking against registered signatures.
+- **Pipe hierarchy** — Pipes can instantiate other pipes. Child pipe's process network is recursively elaborated and merged into parent. Cross-pipe queue wiring via bindings. Dangling queue endpoints become pipe ports.
 
 ### Compiler Pipeline (8 stages)
 
@@ -87,12 +92,13 @@ This graph enables deadlock analysis (Petri net / KPN capacity checks), rule con
 | SV emission | `std::fmt::Write` (direct string building) | 1 |
 | Hashing | `blake3` | 1+ |
 | Build cache | `cacache` | 1+ |
+| FST traces | `fst-reader` 0.15 | debug |
 
 ### Module Layout
 
 ```
 src/
-  main.rs            -- CLI (clap): tbn check / tbn build / tbn graph
+  main.rs            -- CLI (clap): tbn check / tbn build / tbn graph / tbn wave
   lib.rs             -- Pipeline: parse → desugar → type-check → elaborate → schedule → lower
   ast.rs             -- AST types (Spanned nodes, all language constructs)
   ir.rs              -- IR types: ProcessNetwork, ProcessNode (is_memory_stub), QueueEdge, ResolvedPort
@@ -115,6 +121,7 @@ src/
     check.rs         -- Expression/statement type inference
     linearity.rs     -- Cell take/put discipline per rule
   diagnostics.rs     -- Error/warning types + ariadne rendering
+  wave.rs            -- FST waveform trace reader (fst-reader crate)
 tests/
   smoke.rs           -- Basic end-to-end tests
   process.rs         -- Process + rule integration tests
@@ -125,6 +132,10 @@ tests/
   provenance.rs      -- Provenance hashing and embedding tests
   deadlock.rs        -- Deadlock analysis + DOT graph integration tests
   async_queue.rs     -- AsyncQueue CDC: parsing, elaboration, lowering, DOT tests
+  constants.rs       -- Const declaration tests
+  bit_slice.rs       -- Bit slice expression tests
+  external_fn.rs     -- External function / DPI tests
+  pipe_hierarchy.rs  -- Pipe-in-pipe instantiation + cross-pipe wiring tests
   riscv_tests.rs     -- rv32ui compliance: build sim + run 38 tests via Verilator
 examples/
   rv32i.tbn          -- RV32I reference core (4-stage pipeline)
@@ -134,16 +145,20 @@ examples/
   branch.tbn         -- Conditional routing
   peek.tbn           -- Cross-instance Cell peek
   priority.tbn       -- Multi-rule priority suppression
+  marie.tbn          -- Marie Antoinette SoC: 3-domain CPU + bus fabric + UART
 sim/
   rv32i_pkg.sv       -- Hand-written RV32I decode/ALU/branch SV package (compute_result, load_extend, store_merge)
   mem_model.sv       -- Behavioral SRAM with ready/valid interface (combinational read, verilator public)
   tb_top.sv          -- Verilator simulation top-level: CPU + memory models + tohost monitor
   tb_cpu.cpp         -- Verilator C++ testbench driver with ELF loader and FST trace
-  Makefile           -- Simulation build system (sv, build, test-hex, riscv-tests)
+  soc_top.sv         -- Multi-clock SoC testbench wrapper: Marie + memory models
+  soc_tb.cpp         -- 3-domain Verilator driver with ELF loader + UART DPI
+  Makefile           -- Simulation build system (sv, build, test-hex, riscv-tests, soc-*)
   env/p/riscv_test.h -- Custom no-CSR riscv-tests environment for Tourbillon CPU
   build_tests.sh     -- Builds rv32ui tests from riscv-tests submodule with custom env
   tests/smoke.S      -- Minimal RV32I smoke test assembly
   tests/smoke.hex    -- Hand-encoded smoke test (hex, no toolchain needed)
+  tests/hello.S      -- "Hello, World!" SoC test (UART DPI output)
 ```
 
 ### Provenance System
