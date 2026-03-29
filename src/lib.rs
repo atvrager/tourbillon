@@ -1,12 +1,14 @@
 pub mod ast;
 pub mod desugar;
 pub mod diagnostics;
+pub mod elaborate;
+pub mod ir;
 pub mod parse;
 pub mod types;
 
 use diagnostics::{Errors, report_errors};
 
-/// Run the Phase 0 pipeline: parse → desugar → type-check.
+/// Run the pipeline: parse → desugar → type-check → elaborate.
 pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
     let (cst, parse_errors) = parse::parse(src);
 
@@ -29,11 +31,19 @@ pub fn check(src: &str, filename: &str) -> Result<(), Errors> {
         });
     }
 
-    let type_errors = types::check(&ast);
+    let (type_env, type_errors) = types::check(&ast);
     if !type_errors.is_empty() {
         report_errors(src, filename, &type_errors);
         return Err(Errors {
             diagnostics: type_errors,
+        });
+    }
+
+    let (_networks, elab_errors) = elaborate::elaborate(&ast, &type_env);
+    if !elab_errors.is_empty() {
+        report_errors(src, filename, &elab_errors);
+        return Err(Errors {
+            diagnostics: elab_errors,
         });
     }
 

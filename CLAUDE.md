@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Phase 0 complete — lexer, parser, desugaring, type checker, and Cell linearity checker implemented. `TOURBILLON.md` is the authoritative specification.
+**Status:** Phase 0 complete (lexer, parser, desugaring, type checker, linearity). Phase 1 in progress — elaboration (Stage 4) implemented. `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -62,10 +62,11 @@ Tourbillon has exactly three constructs:
 
 ### Core IR
 
-The central IR is a **process network graph** (planned via `petgraph`):
-- Nodes = Processes (containing rules as combinational expression trees)
-- Edges = Queues (annotated with element type and depth)
-- Cells = self-loop edges; shared Cells have multi-process access annotations
+The central IR is a **process network graph** (`petgraph::DiGraph`):
+- Nodes = `ProcessNode` (instance name, rules, resolved ports with edge bindings)
+- Edges = `QueueEdge` (element type, depth, `Queue` or `Cell` kind)
+- Cells = self-loop edges; shared Cells carry `peeker_instances` listing cross-instance readers
+- One `ProcessNetwork` per pipe declaration; standalone process defs produce no graph
 
 This graph enables deadlock analysis (Petri net / KPN capacity checks), rule conflict detection, and scheduling.
 
@@ -76,7 +77,7 @@ This graph enables deadlock analysis (Petri net / KPN capacity checks), rule con
 | Parsing | `chumsky` 1.0-alpha | 0 |
 | Diagnostics | `ariadne` 0.5 | 0 |
 | CLI | `clap` 4 (derive) | 0 |
-| IR graph | `petgraph` | 1+ |
+| IR graph | `petgraph` 0.7 | 1 |
 | SV emission | `askama` or direct `Write` | 1+ |
 | Hashing | `blake3` | 1+ |
 | Build cache | `cacache` | 1+ |
@@ -86,8 +87,10 @@ This graph enables deadlock analysis (Petri net / KPN capacity checks), rule con
 ```
 src/
   main.rs            -- CLI (clap): tbn check <file>
-  lib.rs             -- Pipeline: parse → desugar → type-check
+  lib.rs             -- Pipeline: parse → desugar → type-check → elaborate
   ast.rs             -- AST types (Spanned nodes, all language constructs)
+  ir.rs              -- IR types: ProcessNetwork, ProcessNode, QueueEdge, ResolvedPort
+  elaborate.rs       -- Elaboration pass: AST pipes → petgraph process networks
   parse/
     mod.rs           -- Orchestrates lexer → parser, converts errors
     token.rs         -- Token enum (keywords, operators, punctuation)
@@ -105,6 +108,7 @@ tests/
   smoke.rs           -- Basic end-to-end tests
   process.rs         -- Process + rule integration tests
   linearity.rs       -- Cell linearity error tests
+  elaborate.rs       -- Elaboration integration tests
 ```
 
 ### Provenance System

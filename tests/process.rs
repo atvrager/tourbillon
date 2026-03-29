@@ -89,6 +89,16 @@ process Cond {
 #[test]
 fn simple_pipe() {
     let src = r#"
+process Producer {
+    produces: out : Queue(Bits 32)
+    rule go { out.put(42) }
+}
+
+process Consumer {
+    consumes: input : Queue(Bits 32)
+    rule go { let x = input.take() }
+}
+
 pipe Top {
     let q = Queue(Bits 32, depth = 4)
     Producer { out = q }

@@ -16,7 +16,7 @@ use env::TypeEnv;
 /// - Port protocol: put/take on correct port kinds
 /// - Cell linearity: take() must be followed by exactly one put() on every path
 /// - peek() is exempt from linearity obligations
-pub fn check(source: &SourceFile) -> Vec<Diagnostic> {
+pub fn check(source: &SourceFile) -> (TypeEnv, Vec<Diagnostic>) {
     let mut diagnostics = vec![];
     let mut env = TypeEnv::new();
 
@@ -36,7 +36,7 @@ pub fn check(source: &SourceFile) -> Vec<Diagnostic> {
         }
     }
 
-    diagnostics
+    (env, diagnostics)
 }
 
 fn check_process(process: &Process, env: &TypeEnv, diagnostics: &mut Vec<Diagnostic>) {
@@ -98,13 +98,14 @@ mod tests {
             desugar_diags.is_empty(),
             "desugar errors: {desugar_diags:?}"
         );
-        check(&ast)
+        let (_env, diags) = check(&ast);
+        diags
     }
 
     #[test]
     fn empty_source_typechecks() {
         let source = SourceFile { items: vec![] };
-        let errors = check(&source);
+        let (_env, errors) = check(&source);
         assert!(errors.is_empty());
     }
 
