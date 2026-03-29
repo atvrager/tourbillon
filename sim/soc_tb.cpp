@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <time.h>
 
 // ---------------------------------------------------------------------------
 // DPI: uart_tx — prints characters to stdout
@@ -185,9 +186,8 @@ int main(int argc, char **argv) {
 
     // --- Simulation ---
     // All three clock domains run in lock-step (same frequency).
-    // The async FIFOs still provide structural CDC but with no actual
-    // frequency difference. Multi-rate clocking is a future enhancement
-    // that requires splitting the CPU pipeline stages for true CDC.
+    struct timespec ts_start, ts_end;
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
     uint64_t cycle = 0;
     int result = -1;
 
@@ -221,10 +221,14 @@ int main(int argc, char **argv) {
         cycle++;
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &ts_end);
+    double elapsed = (ts_end.tv_sec - ts_start.tv_sec)
+                   + (ts_end.tv_nsec - ts_start.tv_nsec) * 1e-9;
+    double khz = (elapsed > 0) ? (cycle / elapsed / 1000.0) : 0;
     if (result == 0) {
-        printf("[soc_tb] PASS after %lu cycles\n", cycle);
+        printf("[soc_tb] PASS after %lu cycles (%.3f s, %.0f kHz)\n", cycle, elapsed, khz);
     } else if (result < 0) {
-        fprintf(stderr, "[soc_tb] TIMEOUT after %lu cycles\n", cycle);
+        fprintf(stderr, "[soc_tb] TIMEOUT after %lu cycles (%.3f s, %.0f kHz)\n", cycle, elapsed, khz);
         result = 1;
     }
 

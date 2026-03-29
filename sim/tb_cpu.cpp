@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <time.h>
 
 // ---------------------------------------------------------------------------
 // Minimal ELF32 loader
@@ -239,6 +240,8 @@ int main(int argc, char **argv) {
     }
 
     // --- Main simulation loop ---
+    struct timespec ts_start, ts_end;
+    clock_gettime(CLOCK_MONOTONIC, &ts_start);
     uint64_t cycle = 0;
     uint64_t tick = 10;
     int result = -1;
@@ -270,10 +273,14 @@ int main(int argc, char **argv) {
     }
 
     // --- Report result ---
+    clock_gettime(CLOCK_MONOTONIC, &ts_end);
+    double elapsed = (ts_end.tv_sec - ts_start.tv_sec)
+                   + (ts_end.tv_nsec - ts_start.tv_nsec) * 1e-9;
+    double khz = (elapsed > 0) ? (cycle / elapsed / 1000.0) : 0;
     if (result == 0) {
-        printf("[tb] PASS after %lu cycles\n", cycle);
+        printf("[tb] PASS after %lu cycles (%.3f s, %.0f kHz)\n", cycle, elapsed, khz);
     } else if (result < 0) {
-        fprintf(stderr, "[tb] TIMEOUT after %lu cycles\n", cycle);
+        fprintf(stderr, "[tb] TIMEOUT after %lu cycles (%.3f s, %.0f kHz)\n", cycle, elapsed, khz);
         result = 1;
     }
 
