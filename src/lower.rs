@@ -123,6 +123,23 @@ fn width_decl(width: u64) -> String {
     }
 }
 
+/// Get the SV type declaration for a signal carrying a value of the given type.
+/// Returns the type name for records/enums, or `logic [N-1:0]` for primitives.
+fn sv_type_decl(ty: &Ty) -> String {
+    match ty {
+        Ty::Record { name, .. } => format!("{name} "),
+        Ty::Enum { name, .. } => format!("{name} "),
+        _ => {
+            let w = bit_width(ty);
+            if w <= 1 {
+                "logic ".to_string()
+            } else {
+                format!("logic [{}:0] ", w - 1)
+            }
+        }
+    }
+}
+
 fn binop_sv(op: &BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
@@ -512,15 +529,33 @@ impl<'a> SvEmitter<'a> {
             }
             let sname = sanitize(&edge.name);
             let w = bit_width(&edge.elem_ty);
+            let td = sv_type_decl(&edge.elem_ty);
+
+            // Use typed signals for struct/enum data; raw logic for primitives.
+            // FIFO connects via raw wires; we cast via separate typed signals if needed.
+            let is_structured = matches!(edge.elem_ty, Ty::Record { .. } | Ty::Enum { .. });
             let wd = width_decl(w);
 
             self.line(&format!("// Queue: {}", edge.name));
             self.line(&format!("logic        q_{sname}_enq_valid;"));
             self.line(&format!("wire         q_{sname}_enq_ready;"));
-            self.line(&format!("logic {wd}q_{sname}_enq_data;"));
+            if is_structured {
+                self.line(&format!("{td}q_{sname}_enq_data;"));
+            } else {
+                self.line(&format!("logic {wd}q_{sname}_enq_data;"));
+            }
             self.line(&format!("wire         q_{sname}_deq_valid;"));
             self.line(&format!("logic        q_{sname}_deq_ready;"));
-            self.line(&format!("wire  {wd}q_{sname}_deq_data;"));
+            if is_structured {
+                // For structured types, we need a raw wire from FIFO + typed alias
+                self.line(&format!("wire  {wd}q_{sname}_deq_data_raw;"));
+                self.line(&format!("{td}q_{sname}_deq_data;"));
+                self.line(&format!(
+                    "assign q_{sname}_deq_data = q_{sname}_deq_data_raw;"
+                ));
+            } else {
+                self.line(&format!("wire  {wd}q_{sname}_deq_data;"));
+            }
             self.blank();
             self.line(&format!(
                 "tbn_fifo #(.WIDTH({w}), .DEPTH({})) q_{sname}_inst (",
@@ -534,7 +569,11 @@ impl<'a> SvEmitter<'a> {
             self.line(&format!(".enq_data(q_{sname}_enq_data),"));
             self.line(&format!(".deq_valid(q_{sname}_deq_valid),"));
             self.line(&format!(".deq_ready(q_{sname}_deq_ready),"));
-            self.line(&format!(".deq_data(q_{sname}_deq_data)"));
+            if is_structured {
+                self.line(&format!(".deq_data(q_{sname}_deq_data_raw)"));
+            } else {
+                self.line(&format!(".deq_data(q_{sname}_deq_data)"));
+            }
             self.dedent();
             self.line(");");
             self.blank();
@@ -1136,6 +1175,21 @@ impl<'a> SvEmitter<'a> {
                 "1'b1".to_string()
             }
             Pattern::Variant { name, fields } => {
+                // Case 0: Non-Option, non-Enum scrutinee with Some/None pattern
+                // (e.g. Cell peek — value is always valid, not wrapped in Option SV encoding)
+                if !matches!(scrut_ty, Ty::Option(_) | Ty::Enum { .. }) {
+                    match name.as_str() {
+                        "Some" => {
+                            if fields.len() == 1 {
+                                self.bind_pattern(&fields[0].node, scrut_sv, scrut_ty, ctx);
+                            }
+                            return "1'b1".to_string();
+                        }
+                        "None" => return "1'b0".to_string(),
+                        _ => {}
+                    }
+                }
+
                 // Case 1: Option type from try_take — scrutinee is {valid, data}
                 if let Ty::Option(inner_ty) = scrut_ty {
                     let inner_w = bit_width(inner_ty);
@@ -1283,8 +1337,11 @@ impl<'a> SvEmitter<'a> {
     // Array update statement-level emission
     // -----------------------------------------------------------------------
 
-    /// Emit an array update as a begin/end block with an automatic variable.
-    /// Returns the name of the temporary holding the updated array.
+    /// Emit an array update using copy + indexed part-select overwrite.
+    /// Arrays are packed as flat bit vectors: element i occupies [i*W +: W].
+    /// Emits the copy and overwrite as statements, returns the name of
+    /// the signal holding the result (which is the base itself, modified in-place
+    /// in the combinational block via a helper signal).
     fn emit_array_update(
         &mut self,
         base_expr: &Expr,
@@ -1300,12 +1357,16 @@ impl<'a> SvEmitter<'a> {
         let tmp_name = format!("_upd_{}", ctx.temp_counter);
         ctx.temp_counter += 1;
 
-        if let Ty::Array { elem, size } = &base_ty {
+        if let Ty::Array { elem, .. } = &base_ty {
             let elem_w = bit_width(elem);
-            let wd = width_decl(elem_w);
-            self.line(&format!("automatic logic {wd}{tmp_name} [0:{}];", size - 1));
+            let total_w = bit_width(&base_ty);
+            let wd = width_decl(total_w);
+            // Declare a flat packed temporary, copy base, overwrite one element
+            self.line(&format!("logic {wd}{tmp_name};"));
             self.line(&format!("{tmp_name} = {base};"));
-            self.line(&format!("{tmp_name}[{idx}] = {val};"));
+            self.line(&format!(
+                "{tmp_name}[{idx} * {elem_w} +: {elem_w}] = {val};"
+            ));
         }
 
         tmp_name

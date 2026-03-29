@@ -47,10 +47,12 @@ module CPU (
     // Queue: decode_q
     logic        q_decode_q_enq_valid;
     wire         q_decode_q_enq_ready;
-    logic [143:0] q_decode_q_enq_data;
+    Decoded q_decode_q_enq_data;
     wire         q_decode_q_deq_valid;
     logic        q_decode_q_deq_ready;
-    wire  [143:0] q_decode_q_deq_data;
+    wire  [143:0] q_decode_q_deq_data_raw;
+    Decoded q_decode_q_deq_data;
+    assign q_decode_q_deq_data = q_decode_q_deq_data_raw;
 
     tbn_fifo #(.WIDTH(144), .DEPTH(2)) q_decode_q_inst (
         .clk(clk),
@@ -60,7 +62,7 @@ module CPU (
         .enq_data(q_decode_q_enq_data),
         .deq_valid(q_decode_q_deq_valid),
         .deq_ready(q_decode_q_deq_ready),
-        .deq_data(q_decode_q_deq_data)
+        .deq_data(q_decode_q_deq_data_raw)
     );
 
     // Queue: redir_q
@@ -289,10 +291,10 @@ module CPU (
         end
         // Rule: Decode.crack
         if (r_Decode_crack_will_fire) begin
-            if (c_Writeback_regfile_q == Some) begin
-                q_decode_q_enq_data = Decoded'{op: decode_alu_op((q_fetch_q_deq_data[31:0] & 127), decode_funct3(q_fetch_q_deq_data[31:0]), decode_funct7(q_fetch_q_deq_data[31:0])), rd: decode_rd(q_fetch_q_deq_data[31:0]), rs1_val: regs[decode_rs1(q_fetch_q_deq_data[31:0])], rs2_val: regs[decode_rs2(q_fetch_q_deq_data[31:0])], imm: decode_imm(q_fetch_q_deq_data[31:0], (q_fetch_q_deq_data[31:0] & 127)), pc: q_fetch_q_deq_data[63:32], mem: decode_mem_op((q_fetch_q_deq_data[31:0] & 127)), wb: decode_needs_wb((q_fetch_q_deq_data[31:0] & 127)), is_br: is_branch((q_fetch_q_deq_data[31:0] & 127)), funct3: decode_funct3(q_fetch_q_deq_data[31:0])};
+            if (1'b1) begin
+                q_decode_q_enq_data = Decoded'{op: decode_alu_op((q_fetch_q_deq_data[31:0] & 127), decode_funct3(q_fetch_q_deq_data[31:0]), decode_funct7(q_fetch_q_deq_data[31:0])), rd: decode_rd(q_fetch_q_deq_data[31:0]), rs1_val: c_Writeback_regfile_q[decode_rs1(q_fetch_q_deq_data[31:0])], rs2_val: c_Writeback_regfile_q[decode_rs2(q_fetch_q_deq_data[31:0])], imm: decode_imm(q_fetch_q_deq_data[31:0], (q_fetch_q_deq_data[31:0] & 127)), pc: q_fetch_q_deq_data[63:32], mem: decode_mem_op((q_fetch_q_deq_data[31:0] & 127)), wb: decode_needs_wb((q_fetch_q_deq_data[31:0] & 127)), is_br: is_branch((q_fetch_q_deq_data[31:0] & 127)), funct3: decode_funct3(q_fetch_q_deq_data[31:0])};
                 q_decode_q_enq_valid = 1'b1;
-            end else if (c_Writeback_regfile_q == None) begin
+            end else if (1'b0) begin
             end
         end
         // Rule: Execute.go
@@ -320,9 +322,9 @@ module CPU (
         end
         // Rule: Writeback.commit
         if (r_Writeback_commit_will_fire) begin
-            automatic logic [31:0] _upd_0 [0:31];
+            logic [1023:0] _upd_0;
             _upd_0 = c_Writeback_regfile_q;
-            _upd_0[q_wb_q_deq_data[36:32]] = q_wb_q_deq_data[31:0];
+            _upd_0[q_wb_q_deq_data[36:32] * 32 +: 32] = q_wb_q_deq_data[31:0];
             c_Writeback_regfile_d = _upd_0;
             c_Writeback_regfile_en = 1'b1;
         end
