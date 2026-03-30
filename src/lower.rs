@@ -201,7 +201,7 @@ endmodule
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     name.replace('.', "_")
 }
 
@@ -301,7 +301,7 @@ fn unaryop_sv(op: &UnaryOp) -> &'static str {
 
 /// Collect port names that are unconditionally `put()` in a rule.
 /// Only top-level puts count — puts inside if/match branches are conditional.
-fn collect_unconditional_puts(rule: &Rule) -> BTreeSet<String> {
+pub(crate) fn collect_unconditional_puts(rule: &Rule) -> BTreeSet<String> {
     let mut puts = BTreeSet::new();
     for stmt in &rule.body {
         if let Stmt::Put { target, .. } = &stmt.node {
@@ -313,7 +313,7 @@ fn collect_unconditional_puts(rule: &Rule) -> BTreeSet<String> {
 }
 
 /// Collect port names that use blocking `take()` (not `try_take()`) in a rule.
-fn collect_blocking_takes(rule: &Rule) -> BTreeSet<String> {
+pub(crate) fn collect_blocking_takes(rule: &Rule) -> BTreeSet<String> {
     let mut takes = BTreeSet::new();
     for stmt in &rule.body {
         collect_takes_in_stmt(&stmt.node, &mut takes);
@@ -322,7 +322,7 @@ fn collect_blocking_takes(rule: &Rule) -> BTreeSet<String> {
 }
 
 /// Collect port names that use `try_take()` in a rule.
-fn collect_try_takes(rule: &Rule) -> BTreeSet<String> {
+pub(crate) fn collect_try_takes(rule: &Rule) -> BTreeSet<String> {
     let mut try_takes = BTreeSet::new();
     for stmt in &rule.body {
         collect_try_takes_in_stmt(&stmt.node, &mut try_takes);
@@ -482,7 +482,7 @@ fn collect_takes_in_expr(expr: &Expr, takes: &mut BTreeSet<String>) {
 
 /// Lower scheduled networks to SystemVerilog files.
 /// Returns true for Queue and AsyncQueue edge kinds (not Cell).
-fn is_queue_like(kind: &QueueEdgeKind) -> bool {
+pub(crate) fn is_queue_like(kind: &QueueEdgeKind) -> bool {
     matches!(
         kind,
         QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue

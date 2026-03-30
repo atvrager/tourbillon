@@ -1,5 +1,12 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+#[derive(ValueEnum, Clone, Default)]
+enum Target {
+    #[default]
+    Sv,
+    Chisel,
+}
 
 #[derive(Parser)]
 #[command(name = "tbn", about = "Tourbillon HDL compiler")]
@@ -16,7 +23,7 @@ enum Command {
         #[arg(required = true)]
         files: Vec<PathBuf>,
     },
-    /// Compile to SystemVerilog
+    /// Compile to SystemVerilog or Chisel
     Build {
         /// Input .tbn file(s)
         #[arg(required = true)]
@@ -24,6 +31,9 @@ enum Command {
         /// Output directory
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
+        /// Target backend
+        #[arg(long, value_enum, default_value = "sv")]
+        target: Target,
     },
     /// Show provenance hash and cache status
     Status {
@@ -96,7 +106,11 @@ fn main() {
                 Err(_) => std::process::exit(1),
             }
         }
-        Command::Build { files, output } => {
+        Command::Build {
+            files,
+            output,
+            target,
+        } => {
             // Read all input files and compute provenance from individual files
             let sources: Vec<(String, String)> = files
                 .iter()
@@ -129,22 +143,38 @@ fn main() {
             // Process/type/pipe definitions from earlier files are visible to later ones.
             let (combined_src, display_name) = read_and_concat(&files);
 
-            match tbn::build(&combined_src, &display_name, Some(root_hash)) {
-                Ok(sv_files) => {
-                    for sv_file in &sv_files {
-                        let out_path = output.join(&sv_file.name);
-                        if let Err(e) = std::fs::write(&out_path, &sv_file.content) {
-                            eprintln!("error writing {}: {e}", out_path.display());
-                            std::process::exit(1);
+            match target {
+                Target::Sv => {
+                    match tbn::build(&combined_src, &display_name, Some(root_hash)) {
+                        Ok(sv_files) => {
+                            for sv_file in &sv_files {
+                                let out_path = output.join(&sv_file.name);
+                                if let Err(e) = std::fs::write(&out_path, &sv_file.content) {
+                                    eprintln!("error writing {}: {e}", out_path.display());
+                                    std::process::exit(1);
+                                }
+                                eprintln!("{display_name}: wrote {}", out_path.display());
+                                std::fs::write(cache.join(&sv_file.name), &sv_file.content).ok();
+                            }
                         }
-                        eprintln!("{display_name}: wrote {}", out_path.display());
-                        std::fs::write(cache.join(&sv_file.name), &sv_file.content).ok();
+                        Err(_) => std::process::exit(1),
                     }
+                    eprintln!("provenance: {}", tbn::provenance::hex(&root_hash));
                 }
-                Err(_) => std::process::exit(1),
+                Target::Chisel => match tbn::build_chisel(&combined_src, &display_name) {
+                    Ok(chisel_files) => {
+                        for file in &chisel_files {
+                            let out_path = output.join(&file.name);
+                            if let Err(e) = std::fs::write(&out_path, &file.content) {
+                                eprintln!("error writing {}: {e}", out_path.display());
+                                std::process::exit(1);
+                            }
+                            eprintln!("{display_name}: wrote {}", out_path.display());
+                        }
+                    }
+                    Err(_) => std::process::exit(1),
+                },
             }
-
-            eprintln!("provenance: {}", tbn::provenance::hex(&root_hash));
         }
         Command::Status { files } => {
             let sources: Vec<(String, String)> = files
