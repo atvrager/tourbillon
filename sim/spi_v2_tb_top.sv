@@ -15,10 +15,17 @@ module spi_v2_tb_top (
     input  wire spi_mosi,
     output wire spi_miso,
 
+    // TL-A snoop: live signals
     output wire         tl_a_valid,
-    output wire [189:0] tl_a_data,
     output wire [2:0]   tl_a_opcode,
-    output wire [31:0]  tl_a_address
+    output wire [31:0]  tl_a_address,
+
+    // TL-A capture: latched on each A-channel handshake
+    output logic        tl_a_captured,
+    output logic [2:0]  tl_a_cap_opcode,
+    output logic [31:0] tl_a_cap_address,
+    output logic [127:0] tl_a_cap_data,  // write payload
+    output logic [31:0] tl_a_cap_count   // total A-channel beats seen
 );
 
     wire spi_rst_n = ~spi_csb;
@@ -35,11 +42,27 @@ module spi_v2_tb_top (
     wire miso_enq_valid, miso_enq_data;
     assign spi_miso = miso_enq_valid ? miso_enq_data : 1'b0;
 
-    // TL-A snoop
+    // TL-A snoop (live)
     assign tl_a_valid   = tl_a_enq_valid;
-    assign tl_a_data    = tl_a_enq_data;
     assign tl_a_opcode  = tl_a_enq_data[189:187];
     assign tl_a_address = tl_a_enq_data[175:144];
+
+    // TL-A capture: latch address/opcode/data on each handshake
+    always_ff @(posedge sys_clk or negedge sys_rst_n) begin
+        if (!sys_rst_n) begin
+            tl_a_captured    <= 1'b0;
+            tl_a_cap_opcode  <= '0;
+            tl_a_cap_address <= '0;
+            tl_a_cap_data    <= '0;
+            tl_a_cap_count   <= '0;
+        end else if (tl_a_enq_valid && tl_a_enq_ready) begin
+            tl_a_captured    <= 1'b1;
+            tl_a_cap_opcode  <= tl_a_enq_data[189:187];
+            tl_a_cap_address <= tl_a_enq_data[175:144];
+            tl_a_cap_data    <= tl_a_enq_data[127:0];
+            tl_a_cap_count   <= tl_a_cap_count + 1;
+        end
+    end
 
     // -------------------------------------------------------------------------
     // TileLink auto-responder (same as V1)
