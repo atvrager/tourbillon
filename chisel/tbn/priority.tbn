@@ -1,0 +1,15 @@
+process Priority_Proc {
+    state: count : Cell(Bits 32, init = 10)
+    rule inc {
+        let c = count.take()
+        count.put(c + 1)
+    }
+    rule dec {
+        let c = count.take()
+        count.put(c - 1)
+    }
+}
+
+pipe Priority {
+    Priority_Proc {}
+}

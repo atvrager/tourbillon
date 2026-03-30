@@ -1,0 +1,53 @@
+process Branch_Source {
+    produces: out : Queue(Bits 32)
+    state: seq : Cell(Bits 32, init = 0)
+    rule go {
+        let s = seq.take()
+        out.put(s)
+        seq.put(s + 1)
+    }
+}
+
+process Branch_Router {
+    consumes: input : Queue(Bits 32)
+    produces: high  : Queue(Bits 32)
+    produces: low   : Queue(Bits 32)
+    rule go {
+        let x = input.take()
+        if x > 5 {
+            high.put(x)
+        } else {
+            low.put(x)
+        }
+    }
+}
+
+process Branch_SinkHi {
+    consumes: input : Queue(Bits 32)
+    state: last : Cell(Bits 32, init = 0)
+    rule go {
+        let x = input.take()
+        let _ = last.take()
+        last.put(x)
+    }
+}
+
+process Branch_SinkLo {
+    consumes: input : Queue(Bits 32)
+    state: last : Cell(Bits 32, init = 0)
+    rule go {
+        let x = input.take()
+        let _ = last.take()
+        last.put(x)
+    }
+}
+
+pipe BranchRouter {
+    let data = Queue(Bits 32, depth = 2)
+    let hi   = Queue(Bits 32, depth = 2)
+    let lo   = Queue(Bits 32, depth = 2)
+    Branch_Source { out = data }
+    Branch_Router { input = data, high = hi, low = lo }
+    Branch_SinkHi { input = hi }
+    Branch_SinkLo { input = lo }
+}
