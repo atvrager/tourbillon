@@ -1,0 +1,570 @@
+-- ============================================================
+-- SPI DMA Bridge — Frame-Based Protocol (V2)
+-- ============================================================
+-- Host-initiated DMA over SPI. One CSB assertion = one TL transaction.
+--
+-- Frame format (big-endian, MSB first on MOSI):
+--   Byte 0:    opcode (1 = read, 2 = write)
+--   Bytes 1-4: TL address (big-endian)
+--   Bytes 5-6: beat count (big-endian, 0 = 1 beat)
+--   Bytes 7+:  write data payload (write only, beats × 16 bytes)
+--
+-- For reads: after the 7-byte header, clock dummy bytes on MOSI
+-- while MISO returns read data (beats × 16 bytes, from TL-D).
+--
+-- Architecture:
+--   SPI domain               CDC              System domain
+--   MOSI → Assembler
+--        → FrameParser ──desc_cdc──► DmaEngine → tl_a
+--        → FrameParser ─wr_data_cdc─►          ← tl_d
+--   MISO ← MisoShifter
+--        ← Deserializer ◄─rd_data_cdc─ DmaEngine
+--
+-- 5 processes, 2 domains, 3 AsyncQueue CDC crossings.
+-- No register map. No polling. No buffer SRAM.
+--
+-- Build:  tbn build examples/spi2tlul_v2.tbn -o build/
+-- Check:  tbn check examples/spi2tlul_v2.tbn
+
+-- ============================================================
+-- Types
+-- ============================================================
+
+type TlData = Bits 128
+type TlAddr = Bits 32
+
+record TlA {
+    opcode  : Bits 3
+    size    : Bits 3
+    source  : Bits 8
+    address : TlAddr
+    mask    : Bits 16
+    data    : TlData
+}
+
+record TlD {
+    opcode  : Bits 3
+    size    : Bits 3
+    source  : Bits 8
+    data    : TlData
+    error   : Bool
+}
+
+-- DMA descriptor: one per SPI frame (one per CSB assertion)
+record DmaDesc {
+    op   : Bits 8
+    addr : TlAddr
+    len  : Bits 16
+}
+
+-- ============================================================
+-- Constants
+-- ============================================================
+
+const TL_GET      = 4
+const TL_PUT_FULL = 0
+const TL_SIZE     = 4
+
+const OP_READ     = 1
+const OP_WRITE    = 2
+
+-- ============================================================
+-- SPI Domain Processes
+-- ============================================================
+
+-- SpiByteAssembler: MOSI bits → bytes, MSB first.
+-- Identical to V1.
+
+process SpiByteAssembler {
+    consumes: mosi_pin : Queue(Bits 1)
+    produces: spi_byte : Queue(Bits 8)
+    state:    sr       : Cell(Bits 8, init = 0)
+    state:    count    : Cell(Bits 4, init = 0)
+
+    rule tick {
+        let bit = mosi_pin.take()
+        let s = sr.take()
+        let c = count.take()
+        let next_sr = (s << 1) | bit
+        if c == 7 {
+            spi_byte.put(next_sr)
+            sr.put(0)
+            count.put(0)
+        } else {
+            sr.put(next_sr)
+            count.put(c + 1)
+        }
+    }
+}
+
+-- SpiMisoShifter: bytes → MISO bits, MSB first.
+-- Identical to V1.
+
+process SpiMisoShifter {
+    consumes: miso_byte : Queue(Bits 8)
+    produces: miso_pin  : Queue(Bits 1)
+    state:    sr        : Cell(Bits 8, init = 0)
+    state:    count     : Cell(Bits 4, init = 0)
+
+    rule tick {
+        let s = sr.take()
+        let c = count.take()
+        if c == 0 {
+            match miso_byte.try_take() {
+                Some(byte) => {
+                    miso_pin.put(byte[7:7])
+                    sr.put(byte << 1)
+                    count.put(7)
+                }
+                None => {
+                    miso_pin.put(0)
+                    sr.put(0)
+                    count.put(0)
+                }
+            }
+        } else {
+            miso_pin.put(s[7:7])
+            sr.put(s << 1)
+            count.put(c - 1)
+        }
+    }
+}
+
+-- SpiBulkDeserializer: 128-bit words → byte stream (LSB first).
+-- Identical to V1.
+
+process SpiBulkDeserializer {
+    consumes: bulk_word : Queue(Bits 128)
+    produces: bulk_byte : Queue(Bits 8)
+    state:    word_buf  : Cell(Bits 128, init = 0)
+    state:    byte_idx  : Cell(Bits 5, init = 0)
+
+    rule tick {
+        let w = word_buf.take()
+        let idx = byte_idx.take()
+        if idx == 0 {
+            match bulk_word.try_take() {
+                Some(word) => {
+                    bulk_byte.put(word[7:0])
+                    word_buf.put(word >> 8)
+                    byte_idx.put(1)
+                }
+                None => {
+                    word_buf.put(0)
+                    byte_idx.put(0)
+                }
+            }
+        } else {
+            bulk_byte.put(w[7:0])
+            if idx == 15 {
+                word_buf.put(0)
+                byte_idx.put(0)
+            } else {
+                word_buf.put(w >> 8)
+                byte_idx.put(idx + 1)
+            }
+        }
+    }
+}
+
+-- SpiFrameParser: parse 7-byte header into DmaDesc, stream write data.
+--
+-- Phase encoding:
+--   0 = OP     — waiting for opcode byte
+--   1 = ADDR3  — waiting for address byte 3 (MSB, big-endian)
+--   2 = ADDR2
+--   3 = ADDR1
+--   4 = ADDR0  — waiting for address byte 0 (LSB)
+--   5 = LEN_H  — waiting for length high byte
+--   6 = LEN_L  — waiting for length low byte
+--   7 = EMIT   — emit descriptor
+--   8 = WRDATA — stream write payload bytes
+
+process SpiFrameParser {
+    consumes: spi_byte  : Queue(Bits 8)
+    produces: desc      : Queue(DmaDesc)
+    produces: wr_data   : Queue(Bits 8)
+    state:    phase     : Cell(Bits 4, init = 0)
+    state:    op_reg    : Cell(Bits 8, init = 0)
+    state:    addr_reg  : Cell(Bits 32, init = 0)
+    state:    len_reg   : Cell(Bits 16, init = 0)
+    state:    wr_remain : Cell(Bits 32, init = 0)
+
+    rule tick {
+        let ph = phase.take()
+        let op = op_reg.take()
+        let addr = addr_reg.take()
+        let len = len_reg.take()
+        let remain = wr_remain.take()
+
+        if ph == 7 {
+            -- EMIT: send descriptor to system domain
+            desc.put(DmaDesc { op = op, addr = addr, len = len })
+            if op == OP_WRITE {
+                -- Write: expect data payload next
+                -- Total bytes = (len + 1) * 16
+                phase.put(8)
+                op_reg.put(op)
+                addr_reg.put(addr)
+                len_reg.put(len)
+                wr_remain.put((len + 1) << 4)
+            } else {
+                -- Read: done parsing, MISO data flows via deserializer
+                phase.put(9)
+                op_reg.put(op)
+                addr_reg.put(addr)
+                len_reg.put(len)
+                wr_remain.put(0)
+            }
+        } else {
+            if ph == 8 {
+                -- WRDATA: stream write payload bytes
+                if remain == 0 {
+                    phase.put(9)
+                    op_reg.put(op)
+                    addr_reg.put(addr)
+                    len_reg.put(len)
+                    wr_remain.put(0)
+                } else {
+                    match spi_byte.try_take() {
+                        Some(byte) => {
+                            wr_data.put(byte)
+                            phase.put(8)
+                            op_reg.put(op)
+                            addr_reg.put(addr)
+                            len_reg.put(len)
+                            wr_remain.put(remain - 1)
+                        }
+                        None => {
+                            phase.put(8)
+                            op_reg.put(op)
+                            addr_reg.put(addr)
+                            len_reg.put(len)
+                            wr_remain.put(remain)
+                        }
+                    }
+                }
+            } else {
+                if ph == 9 {
+                    -- DONE: idle until CSB reset
+                    phase.put(9)
+                    op_reg.put(op)
+                    addr_reg.put(addr)
+                    len_reg.put(len)
+                    wr_remain.put(0)
+                } else {
+                    -- Phases 0-6: accumulate header bytes
+                    match spi_byte.try_take() {
+                        Some(byte) => {
+                            if ph == 0 {
+                                -- Opcode byte
+                                phase.put(1)
+                                op_reg.put(byte)
+                                addr_reg.put(0)
+                                len_reg.put(0)
+                                wr_remain.put(0)
+                            } else {
+                                if ph == 1 {
+                                    -- Address byte 3 (MSB)
+                                    phase.put(2)
+                                    op_reg.put(op)
+                                    addr_reg.put(byte << 24)
+                                    len_reg.put(0)
+                                    wr_remain.put(0)
+                                } else {
+                                    if ph == 2 {
+                                        phase.put(3)
+                                        op_reg.put(op)
+                                        addr_reg.put(addr | (byte << 16))
+                                        len_reg.put(0)
+                                        wr_remain.put(0)
+                                    } else {
+                                        if ph == 3 {
+                                            phase.put(4)
+                                            op_reg.put(op)
+                                            addr_reg.put(addr | (byte << 8))
+                                            len_reg.put(0)
+                                            wr_remain.put(0)
+                                        } else {
+                                            if ph == 4 {
+                                                phase.put(5)
+                                                op_reg.put(op)
+                                                addr_reg.put(addr | byte)
+                                                len_reg.put(0)
+                                                wr_remain.put(0)
+                                            } else {
+                                                if ph == 5 {
+                                                    -- Length high byte
+                                                    phase.put(6)
+                                                    op_reg.put(op)
+                                                    addr_reg.put(addr)
+                                                    len_reg.put(byte << 8)
+                                                    wr_remain.put(0)
+                                                } else {
+                                                    -- ph == 6: Length low byte
+                                                    phase.put(7)
+                                                    op_reg.put(op)
+                                                    addr_reg.put(addr)
+                                                    len_reg.put(len | byte)
+                                                    wr_remain.put(0)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            phase.put(ph)
+                            op_reg.put(op)
+                            addr_reg.put(addr)
+                            len_reg.put(len)
+                            wr_remain.put(remain)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- System Domain
+-- ============================================================
+
+-- DmaEngine: takes DMA descriptors, drives TileLink A/D channels.
+-- Replaces both SpiRegMap and TlFsm from V1.
+--
+-- For reads: issues Get beats, forwards D-channel data to rd_data_cdc.
+-- For writes: accumulates bytes from wr_data into 128-bit words,
+--   issues PutFullData beats, consumes D-channel acks.
+--
+-- Phase encoding:
+--   0 = IDLE
+--   1 = READ_SEND — issue TL Get for current beat
+--   2 = READ_WAIT — wait for TL-D response
+--   3 = WRITE_ACC — accumulate 16 bytes into a word
+--   4 = WRITE_SEND — issue TL PutFullData
+--   5 = WRITE_WAIT — wait for TL-D ack
+
+process DmaEngine {
+    consumes: desc      : Queue(DmaDesc)
+    consumes: wr_data   : Queue(Bits 8)
+    produces: rd_data   : Queue(Bits 128)
+    produces: tl_a      : Queue(TlA)
+    consumes: tl_d      : Queue(TlD)
+    state:    phase     : Cell(Bits 4, init = 0)
+    state:    dma_addr  : Cell(Bits 32, init = 0)
+    state:    dma_len   : Cell(Bits 16, init = 0)
+    state:    beat_cnt  : Cell(Bits 16, init = 0)
+    state:    word_acc  : Cell(Bits 128, init = 0)
+    state:    byte_ptr  : Cell(Bits 5, init = 0)
+
+    rule tick {
+        let ph = phase.take()
+        let da = dma_addr.take()
+        let dl = dma_len.take()
+        let bc = beat_cnt.take()
+        let wa = word_acc.take()
+        let bp = byte_ptr.take()
+
+        if ph == 0 {
+            -- IDLE: wait for descriptor
+            match desc.try_take() {
+                Some(d) => {
+                    if d.op == OP_READ {
+                        phase.put(1)
+                    } else {
+                        if d.op == OP_WRITE {
+                            phase.put(3)
+                        } else {
+                            phase.put(0)
+                        }
+                    }
+                    dma_addr.put(d.addr)
+                    dma_len.put(d.len)
+                    beat_cnt.put(0)
+                    word_acc.put(0)
+                    byte_ptr.put(0)
+                }
+                None => {
+                    phase.put(0)
+                    dma_addr.put(da)
+                    dma_len.put(dl)
+                    beat_cnt.put(bc)
+                    word_acc.put(wa)
+                    byte_ptr.put(bp)
+                }
+            }
+        } else {
+            if ph == 1 {
+                -- READ_SEND: issue TL Get
+                tl_a.put(TlA {
+                    opcode  = TL_GET,
+                    size    = TL_SIZE,
+                    source  = 0,
+                    address = da + (bc << 4),
+                    mask    = 0xFFFF,
+                    data    = 0
+                })
+                phase.put(2)
+                dma_addr.put(da)
+                dma_len.put(dl)
+                beat_cnt.put(bc)
+                word_acc.put(wa)
+                byte_ptr.put(bp)
+            } else {
+                if ph == 2 {
+                    -- READ_WAIT: wait for TL-D
+                    match tl_d.try_take() {
+                        Some(resp) => {
+                            rd_data.put(resp.data)
+                            if bc == dl {
+                                -- Last beat: done
+                                phase.put(0)
+                            } else {
+                                -- More beats
+                                phase.put(1)
+                            }
+                            dma_addr.put(da)
+                            dma_len.put(dl)
+                            beat_cnt.put(bc + 1)
+                            word_acc.put(wa)
+                            byte_ptr.put(bp)
+                        }
+                        None => {
+                            phase.put(2)
+                            dma_addr.put(da)
+                            dma_len.put(dl)
+                            beat_cnt.put(bc)
+                            word_acc.put(wa)
+                            byte_ptr.put(bp)
+                        }
+                    }
+                } else {
+                    if ph == 3 {
+                        -- WRITE_ACC: accumulate 16 bytes from wr_data
+                        match wr_data.try_take() {
+                            Some(byte) => {
+                                let shift = bp << 3
+                                let new_wa = wa | (byte << shift)
+                                if bp == 15 {
+                                    -- Word complete → send it
+                                    phase.put(4)
+                                    dma_addr.put(da)
+                                    dma_len.put(dl)
+                                    beat_cnt.put(bc)
+                                    word_acc.put(new_wa)
+                                    byte_ptr.put(0)
+                                } else {
+                                    phase.put(3)
+                                    dma_addr.put(da)
+                                    dma_len.put(dl)
+                                    beat_cnt.put(bc)
+                                    word_acc.put(new_wa)
+                                    byte_ptr.put(bp + 1)
+                                }
+                            }
+                            None => {
+                                phase.put(3)
+                                dma_addr.put(da)
+                                dma_len.put(dl)
+                                beat_cnt.put(bc)
+                                word_acc.put(wa)
+                                byte_ptr.put(bp)
+                            }
+                        }
+                    } else {
+                        if ph == 4 {
+                            -- WRITE_SEND: issue TL PutFullData
+                            tl_a.put(TlA {
+                                opcode  = TL_PUT_FULL,
+                                size    = TL_SIZE,
+                                source  = 0,
+                                address = da + (bc << 4),
+                                mask    = 0xFFFF,
+                                data    = wa
+                            })
+                            phase.put(5)
+                            dma_addr.put(da)
+                            dma_len.put(dl)
+                            beat_cnt.put(bc)
+                            word_acc.put(0)
+                            byte_ptr.put(0)
+                        } else {
+                            -- ph == 5: WRITE_WAIT
+                            match tl_d.try_take() {
+                                Some(resp) => {
+                                    if bc == dl {
+                                        phase.put(0)
+                                    } else {
+                                        phase.put(3)
+                                    }
+                                    dma_addr.put(da)
+                                    dma_len.put(dl)
+                                    beat_cnt.put(bc + 1)
+                                    word_acc.put(0)
+                                    byte_ptr.put(0)
+                                }
+                                None => {
+                                    phase.put(5)
+                                    dma_addr.put(da)
+                                    dma_len.put(dl)
+                                    beat_cnt.put(bc)
+                                    word_acc.put(wa)
+                                    byte_ptr.put(bp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- Top-Level Pipe
+-- ============================================================
+
+pipe Spi2TLULV2 {
+    domain spi : Clock
+
+    -- SPI pins (external)
+    let mosi_pin = external Queue(Bits 1, depth = 1)
+    let miso_pin = external Queue(Bits 1, depth = 1)
+
+    -- TileLink channels (external)
+    let tl_a = external Queue(TlA, depth = 1)
+    let tl_d = external Queue(TlD, depth = 1)
+
+    -- CDC: SPI → system (DMA descriptor)
+    let desc_cdc = AsyncQueue(DmaDesc, depth = 2)
+    -- CDC: SPI → system (write payload bytes)
+    let wr_data_cdc = AsyncQueue(Bits 8, depth = 16)
+    -- CDC: system → SPI (read response 128-bit words)
+    let rd_data_cdc = AsyncQueue(Bits 128, depth = 4)
+
+    -- Internal SPI-domain queues
+    let spi_byte_q  = Queue(Bits 8, depth = 2)
+    let miso_byte_q = Queue(Bits 8, depth = 2)
+
+    -- SPI domain instances
+    SpiByteAssembler [spi] { mosi_pin = mosi_pin, spi_byte = spi_byte_q }
+    SpiFrameParser [spi] {
+        spi_byte = spi_byte_q,
+        desc     = desc_cdc,
+        wr_data  = wr_data_cdc
+    }
+    SpiBulkDeserializer [spi] { bulk_word = rd_data_cdc, bulk_byte = miso_byte_q }
+    SpiMisoShifter [spi] { miso_byte = miso_byte_q, miso_pin = miso_pin }
+
+    -- System domain instances
+    DmaEngine {
+        desc    = desc_cdc,
+        wr_data = wr_data_cdc,
+        rd_data = rd_data_cdc,
+        tl_a    = tl_a,
+        tl_d    = tl_d
+    }
+}

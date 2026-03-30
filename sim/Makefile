@@ -26,10 +26,15 @@ SPI_SV_DIR  ?= spi_sv_out
 SPI_OBJ_DIR := spi_obj_dir
 SPI_BIN     := $(SPI_OBJ_DIR)/sim_spi
 
+SPIV2_SV_DIR  ?= spi_v2_sv_out
+SPIV2_OBJ_DIR := spi_v2_obj_dir
+SPIV2_BIN     := $(SPIV2_OBJ_DIR)/sim_spi_v2
+
 .PHONY: sv verilate build run test-smoke test-hex riscv-tests clean
 .PHONY: soc-sv soc-build soc-hello soc-riscv-tests rtl-check
 .PHONY: rtl-export rtl-export-standalone rtl-export-ext
 .PHONY: spi-sv spi-build spi-test
+.PHONY: spi-v2-sv spi-v2-build spi-v2-test
 
 # Generate SystemVerilog from Tourbillon source
 sv:
@@ -252,8 +257,30 @@ spi-build: spi-sv
 spi-test: spi-build
 	$(SPI_BIN)
 
+# =========================================================================
+# SPI DMA Bridge V2 (frame-based) targets
+# =========================================================================
+
+spi-v2-sv:
+	mkdir -p $(SPIV2_SV_DIR)
+	$(TBN) build ../examples/spi2tlul_v2.tbn -o $(SPIV2_SV_DIR)
+
+spi-v2-build: spi-v2-sv
+	$(VERILATOR) --cc --exe --build --trace-fst -Wall -Wno-fatal \
+		--top-module spi_v2_tb_top \
+		-j $(NPROC) \
+		-I$(SPIV2_SV_DIR) \
+		spi_v2_tb_top.sv \
+		$(SPIV2_SV_DIR)/*.sv \
+		spi_v2_tb.cpp \
+		-o sim_spi_v2 \
+		--Mdir $(SPIV2_OBJ_DIR)
+
+spi-v2-test: spi-v2-build
+	$(SPIV2_BIN)
+
 # Remove build artifacts
 clean:
-	rm -rf $(OBJ_DIR) $(SV_DIR) $(SOC_OBJ_DIR) $(SOC_SV_DIR) $(SPI_OBJ_DIR) $(SPI_SV_DIR) $(RTL_EXPORT_DIR) $(RTL_ZIP)
+	rm -rf $(OBJ_DIR) $(SV_DIR) $(SOC_OBJ_DIR) $(SOC_SV_DIR) $(SPI_OBJ_DIR) $(SPI_SV_DIR) $(SPIV2_OBJ_DIR) $(SPIV2_SV_DIR) $(RTL_EXPORT_DIR) $(RTL_ZIP)
 	rm -f tests/*.bin tests/*.o tests/*.elf
-	rm -f sim_trace.vcd sim_trace.fst soc_trace.fst spi_trace.fst
+	rm -f sim_trace.vcd sim_trace.fst soc_trace.fst spi_trace.fst spi_v2_trace.fst
