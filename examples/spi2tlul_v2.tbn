@@ -33,20 +33,30 @@
 type TlData = Bits 128
 type TlAddr = Bits 32
 
+-- TileLink-UL channel types matching OpenTitan tlul_pkg layout.
+-- Field order = MSB-first in the packed bit vector (Cat in Chisel,
+-- struct packed in SV).  Unused fields (param, user, sink) are
+-- zero-filled by the DMA engine so the Chisel wrapper can drop away.
+
 record TlA {
     opcode  : Bits 3
-    size    : Bits 3
+    param   : Bits 3
+    size    : Bits 4
     source  : Bits 8
     address : TlAddr
     mask    : Bits 16
     data    : TlData
+    user    : Bits 23
 }
 
 record TlD {
     opcode  : Bits 3
-    size    : Bits 3
+    param   : Bits 3
+    size    : Bits 4
     source  : Bits 8
+    sink    : Bits 1
     data    : TlData
+    user    : Bits 14
     error   : Bool
 }
 
@@ -401,11 +411,13 @@ process DmaEngine {
                 -- READ_SEND: issue TL Get
                 tl_a.put(TlA {
                     opcode  = TL_GET,
+                    param   = 0,
                     size    = TL_SIZE,
                     source  = 0,
                     address = da + (bc << 4),
                     mask    = 0xFFFF,
-                    data    = 0
+                    data    = 0,
+                    user    = 0
                 })
                 phase.put(2)
                 dma_addr.put(da)
@@ -479,11 +491,13 @@ process DmaEngine {
                             -- WRITE_SEND: issue TL PutFullData
                             tl_a.put(TlA {
                                 opcode  = TL_PUT_FULL,
+                                param   = 0,
                                 size    = TL_SIZE,
                                 source  = 0,
                                 address = da + (bc << 4),
                                 mask    = 0xFFFF,
-                                data    = wa
+                                data    = wa,
+                                user    = 0
                             })
                             phase.put(5)
                             dma_addr.put(da)

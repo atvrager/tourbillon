@@ -47,7 +47,7 @@ class Spi2TLULV2TestWrapper extends Module {
   val TL_ACCESS_ACK_DATA = 1.U(3.W)
 
   val respPending = RegInit(false.B)
-  val respReq     = RegInit(0.U(190.W))
+  val respReq     = RegInit(0.U(217.W))
   val tlAReady    = RegInit(true.B)
 
   dut.io.q_tl_a.ready := tlAReady
@@ -62,18 +62,31 @@ class Spi2TLULV2TestWrapper extends Module {
   respReq     := Mux(acceptA, aData, respReq)
   tlAReady    := Mux(acceptA, false.B, Mux(completeD, true.B, tlAReady))
 
-  // Decode latched request
-  val reqOpcode = respReq(189, 187)
-  val reqSize   = respReq(186, 184)
-  val reqSource = respReq(183, 176)
-  val reqAddr   = respReq(175, 144)
+  // Decode latched request — OpenTitan TL-A layout (217 bits):
+  // [216:214]=opcode, [213:211]=param, [210:207]=size, [206:199]=source,
+  // [198:167]=address, [166:151]=mask, [150:23]=data, [22:0]=user
+  val reqOpcode = respReq(216, 214)
+  val reqSize   = respReq(210, 207)
+  val reqSource = respReq(206, 199)
+  val reqAddr   = respReq(198, 167)
 
   val respOpcode = Mux(reqOpcode === TL_GET, TL_ACCESS_ACK_DATA, TL_ACCESS_ACK)
   // Read response echoes address in low 32 bits
   val respData = Cat(0.U(96.W), reqAddr)
 
+  // TL-D response: [161:159]=opcode, [158:156]=param, [155:152]=size,
+  // [151:144]=source, [143]=sink, [142:15]=data, [14:1]=user, [0]=error
   dut.io.q_tl_d.valid := respPending
-  dut.io.q_tl_d.bits  := Cat(respOpcode, reqSize, reqSource, respData, 0.U(1.W))
+  dut.io.q_tl_d.bits  := Cat(
+    respOpcode,          // 3 bits opcode
+    0.U(3.W),            // 3 bits param
+    reqSize,             // 4 bits size
+    reqSource,           // 8 bits source
+    0.U(1.W),            // 1 bit sink
+    respData,            // 128 bits data
+    0.U(14.W),           // 14 bits user
+    0.U(1.W)             // 1 bit error
+  )
 
   // -------------------------------------------------------------------------
   // TL-A capture registers
@@ -90,9 +103,9 @@ class Spi2TLULV2TestWrapper extends Module {
   val firstCapDone    = RegInit(false.B)
 
   captured   := Mux(aHandshake, true.B, captured)
-  capOpcode  := Mux(aHandshake, aData(189, 187), capOpcode)
-  capAddress := Mux(aHandshake, aData(175, 144), capAddress)
-  capData    := Mux(aHandshake, aData(127, 0), capData)
+  capOpcode  := Mux(aHandshake, aData(216, 214), capOpcode)
+  capAddress := Mux(aHandshake, aData(198, 167), capAddress)
+  capData    := Mux(aHandshake, aData(150, 23), capData)
   capCount   := Mux(aHandshake, capCount + 1.U, capCount)
 
   when (io.tl_a_first_reset) {
@@ -100,8 +113,8 @@ class Spi2TLULV2TestWrapper extends Module {
     firstCapAddress := 0.U
     firstCapData    := 0.U
   } .elsewhen (aHandshake && !firstCapDone) {
-    firstCapAddress := aData(175, 144)
-    firstCapData    := aData(127, 0)
+    firstCapAddress := aData(198, 167)
+    firstCapData    := aData(150, 23)
     firstCapDone    := true.B
   }
 
