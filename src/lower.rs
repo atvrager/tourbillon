@@ -741,6 +741,7 @@ impl<'a> SvEmitter<'a> {
         self.emit_dpi_imports();
         self.emit_type_declarations();
         self.emit_queue_instances();
+        self.emit_memory_port_aliases();
         self.emit_cell_declarations();
         self.emit_rule_enables();
         self.emit_rule_logic();
@@ -886,6 +887,48 @@ impl<'a> SvEmitter<'a> {
             }
         }
         ports
+    }
+
+    /// Emit typed local aliases for external queue (memory-port) data signals
+    /// that carry structured types (Record / Enum). Module ports must be flat
+    /// `logic [N:0]`, but the combinational logic emits `.field` access, so we
+    /// create a locally-typed signal and assign the port into it.
+    fn emit_memory_port_aliases(&mut self) {
+        let mut sorted: Vec<(EdgeIndex, bool)> =
+            self.memory_edges.iter().map(|(&k, &v)| (k, v)).collect();
+        sorted.sort_by_key(|(idx, _)| idx.index());
+
+        let mut any = false;
+        for (edge_idx, cpu_is_writer) in &sorted {
+            let edge = &self.net.network.graph[*edge_idx];
+            let is_structured = matches!(edge.elem_ty, Ty::Record { .. } | Ty::Enum { .. });
+            if !is_structured {
+                continue;
+            }
+
+            let sname = sanitize(&edge.name);
+            let td = sv_type_decl(&edge.elem_ty);
+
+            if !any {
+                self.line("// Typed aliases for external queue ports with structured types");
+                any = true;
+            }
+
+            if *cpu_is_writer {
+                // Output ports: comb logic assigns struct literals into flat logic.
+                // Verilator handles this fine — no alias needed.
+            } else {
+                // CPU reads → deq_data is an input port (flat wire).
+                // Create a typed local signal and assign from the flat port.
+                self.line(&format!("{td}q_{sname}_deq_data_typed;"));
+                self.line(&format!(
+                    "assign q_{sname}_deq_data_typed = q_{sname}_deq_data;"
+                ));
+            }
+        }
+        if any {
+            self.blank();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1527,7 +1570,15 @@ impl<'a> SvEmitter<'a> {
                     match &edge.kind {
                         QueueEdgeKind::Cell { .. } => format!("c_{sname}_q"),
                         QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue => {
-                            format!("q_{sname}_deq_data")
+                            // Use typed alias for external queue ports with structured types
+                            let suffix = if self.memory_edges.contains_key(&edge_idx)
+                                && matches!(edge.elem_ty, Ty::Record { .. } | Ty::Enum { .. })
+                            {
+                                "_typed"
+                            } else {
+                                ""
+                            };
+                            format!("q_{sname}_deq_data{suffix}")
                         }
                     }
                 } else {
@@ -1547,7 +1598,15 @@ impl<'a> SvEmitter<'a> {
                 if let Some(&edge_idx) = ctx.port_edges.get(queue) {
                     let edge = &self.net.network.graph[edge_idx];
                     let sname = sanitize(&edge.name);
-                    format!("{{q_{sname}_deq_valid, q_{sname}_deq_data}}")
+                    // Use typed alias for external queue ports with structured types
+                    let suffix = if self.memory_edges.contains_key(&edge_idx)
+                        && matches!(edge.elem_ty, Ty::Record { .. } | Ty::Enum { .. })
+                    {
+                        "_typed"
+                    } else {
+                        ""
+                    };
+                    format!("{{q_{sname}_deq_valid, q_{sname}_deq_data{suffix}}}")
                 } else {
                     format!("/* unknown port {queue} */ '0")
                 }

@@ -22,9 +22,14 @@ SOC_SV_DIR ?= soc_sv_out
 SOC_OBJ_DIR := soc_obj_dir
 SOC_BIN     := $(SOC_OBJ_DIR)/sim_soc
 
+SPI_SV_DIR  ?= spi_sv_out
+SPI_OBJ_DIR := spi_obj_dir
+SPI_BIN     := $(SPI_OBJ_DIR)/sim_spi
+
 .PHONY: sv verilate build run test-smoke test-hex riscv-tests clean
 .PHONY: soc-sv soc-build soc-hello soc-riscv-tests rtl-check
 .PHONY: rtl-export rtl-export-standalone rtl-export-ext
+.PHONY: spi-sv spi-build spi-test
 
 # Generate SystemVerilog from Tourbillon source
 sv:
@@ -222,8 +227,33 @@ rtl-export-ext: soc-sv
 	@echo "Exported: $(RTL_ZIP) (external memory — STANDALONE=0)"
 	@unzip -l $(RTL_ZIP) | grep '\.sv\|filelist'
 
+# =========================================================================
+# SPI-to-TileLink-UL bridge targets
+# =========================================================================
+
+# Generate SV from Tourbillon source
+spi-sv:
+	mkdir -p $(SPI_SV_DIR)
+	$(TBN) build ../examples/spi2tlul.tbn -o $(SPI_SV_DIR)
+
+# Build SPI bridge simulator
+spi-build: spi-sv
+	$(VERILATOR) --cc --exe --build --trace-fst -Wall -Wno-fatal \
+		--top-module spi_tb_top \
+		-j $(NPROC) \
+		-I$(SPI_SV_DIR) \
+		spi_tb_top.sv \
+		$(SPI_SV_DIR)/*.sv \
+		spi_tb.cpp \
+		-o sim_spi \
+		--Mdir $(SPI_OBJ_DIR)
+
+# Build and run the SPI testbench
+spi-test: spi-build
+	$(SPI_BIN)
+
 # Remove build artifacts
 clean:
-	rm -rf $(OBJ_DIR) $(SV_DIR) $(SOC_OBJ_DIR) $(SOC_SV_DIR) $(RTL_EXPORT_DIR) $(RTL_ZIP)
+	rm -rf $(OBJ_DIR) $(SV_DIR) $(SOC_OBJ_DIR) $(SOC_SV_DIR) $(SPI_OBJ_DIR) $(SPI_SV_DIR) $(RTL_EXPORT_DIR) $(RTL_ZIP)
 	rm -f tests/*.bin tests/*.o tests/*.elf
-	rm -f sim_trace.vcd sim_trace.fst soc_trace.fst
+	rm -f sim_trace.vcd sim_trace.fst soc_trace.fst spi_trace.fst
