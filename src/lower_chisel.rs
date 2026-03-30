@@ -238,11 +238,15 @@ impl<'a> ChiselEmitter<'a> {
                     self.blank();
                 }
                 Ty::Enum { variants, .. } => {
-                    self.line(&format!("object {name} extends ChiselEnum {{"));
+                    // Emit as integer constants (matching SV typedef enum).
+                    // ChiselEnum is type-incompatible with our packed-bit-vector
+                    // records where enum fields are extracted as UInt slices.
+                    self.line(&format!("object {name} {{"));
                     self.indent();
-                    let variant_names: Vec<&str> =
-                        variants.iter().map(|(vn, _)| vn.as_str()).collect();
-                    self.line(&format!("val {} = Value", variant_names.join(", ")));
+                    for (i, (vname, _)) in variants.iter().enumerate() {
+                        let escaped = escape_scala_keyword(vname);
+                        self.line(&format!("val {escaped} = {i}.U"));
+                    }
                     self.dedent();
                     self.line("}");
                     self.blank();
@@ -653,9 +657,10 @@ impl<'a> ChiselEmitter<'a> {
                 }
             }
             Stmt::Expr(expr) => {
-                let chisel = self.emit_expr(&expr.node, ctx);
-                if matches!(&expr.node, Expr::Call { .. }) {
-                    self.line(&format!("// DPI call: {chisel}"));
+                if let Expr::Call { func, args } = &expr.node {
+                    let arg_strs: Vec<String> =
+                        args.iter().map(|a| self.emit_expr(&a.node, ctx)).collect();
+                    self.line(&format!("// DPI: {func}({})", arg_strs.join(", ")));
                 }
             }
             Stmt::If {
@@ -779,7 +784,8 @@ impl<'a> ChiselEmitter<'a> {
                     return;
                 }
 
-                // Integer/literal match — chained when/elsewhen
+                // Non-Option, non-Enum match — handle Some/None on plain values
+                // (e.g. Cell peek wrapped in match Some(x) => ...)
                 let scrut_chisel = self.emit_expr(&scrutinee.node, ctx);
                 for (i, arm) in arms.iter().enumerate() {
                     let cond = match &arm.pattern.node {
@@ -792,6 +798,14 @@ impl<'a> ChiselEmitter<'a> {
                             ctx.var_types.insert(name.clone(), scrut_ty.clone());
                             "true.B".to_string()
                         }
+                        Pattern::Variant { name, fields } if name == "Some" => {
+                            // Non-Option Some pattern: bind inner value to scrutinee
+                            if fields.len() == 1 {
+                                self.bind_pattern(&fields[0].node, &scrut_chisel, &scrut_ty, ctx);
+                            }
+                            "true.B".to_string()
+                        }
+                        Pattern::Variant { name, .. } if name == "None" => "false.B".to_string(),
                         _ => "true.B".to_string(),
                     };
                     if i == 0 {
@@ -827,10 +841,16 @@ impl<'a> ChiselEmitter<'a> {
     ) -> String {
         match pattern {
             Pattern::Variant { name, fields } => {
-                if let Ty::Enum { variants, .. } = scrut_ty {
+                if let Ty::Enum {
+                    name: enum_name,
+                    variants,
+                    ..
+                } = scrut_ty
+                {
+                    let qualified = format!("{enum_name}.{}", escape_scala_keyword(name));
                     if max_payload == 0 {
                         // Pure enum
-                        return format!("{scrut_chisel} === {name}");
+                        return format!("{scrut_chisel} === {qualified}");
                     }
                     let total_w = tag_bits + max_payload;
                     let tag_sv = format!("{scrut_chisel}({}, {})", total_w - 1, max_payload);
@@ -851,7 +871,7 @@ impl<'a> ChiselEmitter<'a> {
                             offset += w;
                         }
                     }
-                    format!("{tag_sv} === {name}")
+                    format!("{tag_sv} === {qualified}")
                 } else {
                     format!("{scrut_chisel} === {name}")
                 }
@@ -997,25 +1017,31 @@ impl<'a> ChiselEmitter<'a> {
                 let base_ty = self.infer_expr_type(&e.node, ctx);
                 if let Ty::Array { elem, .. } = &base_ty {
                     let elem_w = bit_width(elem);
-                    format!("{base}({idx} * {elem_w}.U + {elem_w}.U - 1.U, {idx} * {elem_w}.U)")
+                    // Dynamic array indexing: shift right by (idx * elem_w) and mask
+                    // Chisel's (hi, lo) requires Int, not UInt, so we use >> and mask
+                    format!("({base} >> ({idx} * {elem_w}.U))({}, 0)", elem_w - 1)
                 } else {
                     format!("{base}({idx})")
                 }
             }
             Expr::Call { func, args } => {
-                let arg_strs: Vec<String> =
+                // DPI calls have no Chisel equivalent. Emit 0.U as a placeholder.
+                // The return type width is unknown here, so we use 0.U which
+                // Chisel will infer. A comment on the preceding line documents the call.
+                let _arg_strs: Vec<String> =
                     args.iter().map(|a| self.emit_expr(&a.node, ctx)).collect();
-                format!("/* DPI: {func}({}) */", arg_strs.join(", "))
+                let _ = func;
+                "0.U".to_string()
             }
             Expr::Update {
                 expr: e,
-                index,
-                value,
+                index: _,
+                value: _,
             } => {
-                let base = self.emit_expr(&e.node, ctx);
-                let idx = self.emit_expr(&index.node, ctx);
-                let val = self.emit_expr(&value.node, ctx);
-                format!("/* update({base}, {idx}, {val}) */")
+                // Functional array update — no direct Chisel equivalent.
+                // Emit the base value as a placeholder; the update is lost.
+                // TODO: implement via VecInit + index assignment
+                self.emit_expr(&e.node, ctx)
             }
             Expr::BitSlice { expr, hi, lo } => {
                 let e = self.emit_expr(&expr.node, ctx);
@@ -1217,7 +1243,15 @@ impl<'a> ChiselEmitter<'a> {
                 format!("UInt({total}.W)")
             }
             Ty::Record { name, .. } => format!("new {name}"),
-            Ty::Enum { name, .. } => format!("{name}()"),
+            Ty::Enum { variants, .. } => {
+                let n = variants.len() as u64;
+                let bits = if n <= 1 {
+                    1
+                } else {
+                    (n as f64).log2().ceil() as u64
+                };
+                format!("UInt({bits}.W)")
+            }
             Ty::Array { elem, size } => {
                 let total = bit_width(elem) * size;
                 format!("UInt({total}.W)")
@@ -1234,6 +1268,18 @@ impl<'a> ChiselEmitter<'a> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Backtick-escape Scala/Chisel reserved words that may appear as enum variant names.
+fn escape_scala_keyword(name: &str) -> String {
+    match name {
+        "None" | "Some" | "type" | "val" | "var" | "def" | "class" | "object" | "trait"
+        | "import" | "true" | "false" | "null" | "new" | "match" | "case" | "if" | "else"
+        | "for" | "while" | "do" | "return" | "throw" | "try" | "catch" | "finally" | "yield"
+        | "abstract" | "extends" | "with" | "override" | "lazy" | "sealed" | "implicit"
+        | "private" | "protected" => format!("`{name}`"),
+        _ => name.to_string(),
+    }
+}
 
 fn chisel_uint(width: u64) -> String {
     format!("UInt({width}.W)")
