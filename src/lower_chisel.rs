@@ -968,14 +968,18 @@ impl<'a> ChiselEmitter<'a> {
                         .iter()
                         .map(|(fname, val)| (fname.node.as_str(), val))
                         .collect();
-                    // Emit in declaration order (MSB first for Cat)
+                    // Emit in declaration order (MSB first for Cat).
+                    // Pad each value to the field's declared width to ensure
+                    // the Cat produces the correct total bit width.
                     let parts: Vec<String> = ty_fields
                         .iter()
-                        .map(|(fname, _)| {
+                        .map(|(fname, fty)| {
+                            let fw = bit_width(fty);
                             if let Some(val) = field_map.get(fname.as_str()) {
-                                self.emit_expr(&val.node, ctx)
+                                let expr = self.emit_expr(&val.node, ctx);
+                                format!("{expr}.pad({fw})")
                             } else {
-                                "0.U".to_string()
+                                format!("0.U({fw}.W)")
                             }
                         })
                         .collect();
@@ -1562,7 +1566,7 @@ pipe Top {
         let scala = &files[0].content;
 
         assert!(
-            scala.contains("Cat(1.U, 42.U)"),
+            scala.contains("Cat(1.U.pad(8), 42.U.pad(32))"),
             "record construction uses Cat"
         );
         assert!(scala.contains("class Cmd extends Bundle"), "Bundle class");

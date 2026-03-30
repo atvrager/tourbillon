@@ -3,3 +3,13 @@ build/
 project/target/
 project/project/
 .bsp/
+
+# Generated Chisel modules — regenerate with: make generate
+src/main/scala/tbn/Counter.scala
+src/main/scala/tbn/ProducerConsumer.scala
+src/main/scala/tbn/Priority.scala
+src/main/scala/tbn/BranchRouter.scala
+src/main/scala/tbn/PeekTest.scala
+src/main/scala/tbn/AsyncCDC.scala
+src/main/scala/tbn/Spi2TLULV2.scala
+src/main/scala/tbn/Marie.scala
