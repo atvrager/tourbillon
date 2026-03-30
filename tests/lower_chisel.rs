@@ -85,6 +85,89 @@ fn golden_chisel_branch() {
 }
 
 // ---------------------------------------------------------------------------
+// Complex design compilation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chisel_async_example_compiles() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = std::fs::read_to_string(manifest_dir.join("examples/async_example.tbn")).unwrap();
+    let files = tbn::build_chisel(&src, "async_example.tbn").unwrap();
+    assert_eq!(files.len(), 1);
+    let scala = &files[0].content;
+
+    assert!(scala.contains("TbnAsyncFifo"), "AsyncQueue BlackBox");
+    assert!(scala.contains("when ("), "when blocks");
+}
+
+#[test]
+fn chisel_spi_v2_compiles() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = std::fs::read_to_string(manifest_dir.join("examples/spi2tlul_v2.tbn")).unwrap();
+    let files = tbn::build_chisel(&src, "spi2tlul_v2.tbn").unwrap();
+    assert_eq!(files.len(), 1);
+    let scala = &files[0].content;
+
+    // Records as Bundle classes
+    assert!(scala.contains("class DmaDesc extends Bundle"));
+    assert!(scala.contains("class TlA extends Bundle"));
+    assert!(scala.contains("class TlD extends Bundle"));
+
+    // External queues as IO
+    assert!(scala.contains("Decoupled("));
+    assert!(scala.contains("Flipped(Decoupled("));
+
+    // AsyncQueues
+    assert!(scala.contains("TbnAsyncFifo"));
+
+    // Record construction via Cat
+    assert!(scala.contains("Cat("));
+
+    // No SV constructs
+    assert!(!scala.contains("always_ff"));
+    assert!(!scala.contains("always_comb"));
+}
+
+#[test]
+fn chisel_marie_soc_compiles() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cpu_src = std::fs::read_to_string(manifest_dir.join("examples/cpu_core.tbn")).unwrap();
+    let marie_src = std::fs::read_to_string(manifest_dir.join("examples/marie.tbn")).unwrap();
+    let combined = format!("{cpu_src}\n{marie_src}");
+
+    let files = tbn::build_chisel(&combined, "marie.tbn").unwrap();
+    // Marie emits one module (Marie pipe)
+    assert!(!files.is_empty(), "should produce at least one file");
+    let scala = &files
+        .iter()
+        .find(|f| f.name == "Marie.scala")
+        .unwrap()
+        .content;
+
+    // Records and enums
+    assert!(scala.contains("class Decoded extends Bundle"));
+    assert!(scala.contains("class BusReq extends Bundle"));
+    assert!(scala.contains("object MemOp extends ChiselEnum"));
+
+    // Constants
+    assert!(scala.contains("val BAUD_DIV = 33.U"));
+    assert!(scala.contains("val MEM_REGION = 8.U"));
+
+    // External queues (UART TX pin, memory ports)
+    assert!(scala.contains("Decoupled("));
+
+    // AsyncQueues for CDC
+    assert!(scala.contains("TbnAsyncFifo"));
+
+    // DPI stubs (uart_sim_tx etc.)
+    assert!(scala.contains("DPI:"));
+
+    // No SV constructs
+    assert!(!scala.contains("always_ff"));
+    assert!(!scala.contains("endmodule"));
+}
+
+// ---------------------------------------------------------------------------
 // Structural tests
 // ---------------------------------------------------------------------------
 
