@@ -1,0 +1,882 @@
+-- ============================================================
+-- SPI-to-TileLink-UL Bridge
+-- ============================================================
+-- Translates an SPI slave interface into TileLink-UL host
+-- transactions. Ported from a 521-line Chisel module that
+-- interleaved two clock domains in a single always block.
+--
+-- Architecture:
+--   SPI domain (spi_clk) ── AsyncQueue CDC ── System domain (clk)
+--
+--   MOSI → SpiByteAssembler → SpiCmdDecoder ──spi2sys──► SpiRegMap
+--   MISO ← SpiMisoShifter  ← SpiCmdDecoder ◄─sys2spi── SpiRegMap
+--   SpiBulkDeserializer ◄──── bulk_data_cdc ◄─ TlFsm ──► tl_a
+--                                               TlFsm ◄── tl_d
+--
+-- CSB (chip select, active-low) resets the SPI domain externally.
+-- Every SPI-domain process resets when CSB goes high; the first
+-- byte after CSB drops is always the command byte.
+--
+-- Build:  tbn build examples/spi2tlul.tbn -o build/
+-- Check:  tbn check examples/spi2tlul.tbn
+
+-- ============================================================
+-- Type definitions
+-- ============================================================
+
+type TlData = Bits 128
+type TlAddr = Bits 32
+
+record TlA {
+    opcode  : Bits 3
+    size    : Bits 3
+    source  : Bits 8
+    address : TlAddr
+    mask    : Bits 16
+    data    : TlData
+}
+
+record TlD {
+    opcode  : Bits 3
+    size    : Bits 3
+    source  : Bits 8
+    data    : TlData
+    error   : Bool
+}
+
+-- TlCmd: command sent from SpiRegMap to TlFsm with captured address/length.
+-- Encodes the operation in `op`: 0 = clear, 1 = read, 2 = write.
+record TlCmd {
+    op   : Bits 8
+    addr : TlAddr
+    len  : Bits 16
+}
+
+-- ============================================================
+-- Constants
+-- ============================================================
+
+-- TileLink-UL opcodes
+const TL_GET          = 4
+const TL_PUT_FULL     = 0
+
+-- Data width in bytes (128 / 8)
+const TL_W            = 16
+const TL_SIZE         = 4
+
+-- SPI register addresses (7-bit, MSB of command byte = R/W)
+const REG_TL_ADDR_0   = 0x00
+const REG_TL_ADDR_1   = 0x01
+const REG_TL_ADDR_2   = 0x02
+const REG_TL_ADDR_3   = 0x03
+const REG_TL_LEN_L    = 0x04
+const REG_TL_LEN_H    = 0x05
+const REG_TL_CMD      = 0x06
+const REG_TL_STATUS   = 0x07
+const REG_DATA_BUF    = 0x08
+const REG_WR_STATUS   = 0x09
+const REG_BULK_WR_L   = 0x0A
+const REG_BULK_WR_H   = 0x0B
+const REG_BULK_RD_L   = 0x0C
+const REG_BULK_RD_H   = 0x0D
+const REG_BULK_RD_STS_L = 0x0E
+const REG_BULK_RD_STS_H = 0x0F
+
+-- Buffer depth (in 128-bit words)
+const BUFFER_DEPTH     = 256
+
+-- ============================================================
+-- SPI Domain Processes
+-- ============================================================
+
+-- SpiByteAssembler: shift in MOSI bits, emit completed bytes.
+-- Shifts MSB first: each bit is shifted left into the accumulator.
+-- After 8 bits, the completed byte is put to spi_byte.
+
+process SpiByteAssembler {
+    consumes: mosi_pin : Queue(Bits 1)
+    produces: spi_byte : Queue(Bits 8)
+    state:    sr       : Cell(Bits 8, init = 0)
+    state:    count    : Cell(Bits 4, init = 0)
+
+    rule tick {
+        let bit = mosi_pin.take()
+        let s = sr.take()
+        let c = count.take()
+        let next_sr = (s << 1) | bit
+        if c == 7 {
+            spi_byte.put(next_sr)
+            sr.put(0)
+            count.put(0)
+        } else {
+            sr.put(next_sr)
+            count.put(c + 1)
+        }
+    }
+}
+
+-- SpiMisoShifter: shift out bytes on MISO, MSB first.
+-- Takes a byte from miso_byte, shifts it out 8 bits.
+-- When idle (no byte loaded), outputs 0.
+
+process SpiMisoShifter {
+    consumes: miso_byte : Queue(Bits 8)
+    produces: miso_pin  : Queue(Bits 1)
+    state:    sr        : Cell(Bits 8, init = 0)
+    state:    count     : Cell(Bits 4, init = 0)
+
+    rule tick {
+        let s = sr.take()
+        let c = count.take()
+        if c == 0 {
+            match miso_byte.try_take() {
+                Some(byte) => {
+                    miso_pin.put(byte[7:7])
+                    sr.put(byte << 1)
+                    count.put(7)
+                }
+                None => {
+                    miso_pin.put(0)
+                    sr.put(0)
+                    count.put(0)
+                }
+            }
+        } else {
+            miso_pin.put(s[7:7])
+            sr.put(s << 1)
+            count.put(c - 1)
+        }
+    }
+}
+
+-- SpiBulkDeserializer: convert 128-bit words into byte stream.
+-- Takes words from the bulk CDC AsyncQueue, emits bytes LSB first
+-- (little-endian byte order within each word).
+
+process SpiBulkDeserializer {
+    consumes: bulk_word : Queue(Bits 128)
+    produces: bulk_byte : Queue(Bits 8)
+    state:    word_buf  : Cell(Bits 128, init = 0)
+    state:    byte_idx  : Cell(Bits 5, init = 0)
+
+    rule tick {
+        let w = word_buf.take()
+        let idx = byte_idx.take()
+        if idx == 0 {
+            match bulk_word.try_take() {
+                Some(word) => {
+                    bulk_byte.put(word[7:0])
+                    word_buf.put(word >> 8)
+                    byte_idx.put(1)
+                }
+                None => {
+                    word_buf.put(0)
+                    byte_idx.put(0)
+                }
+            }
+        } else {
+            bulk_byte.put(w[7:0])
+            if idx == 15 {
+                word_buf.put(0)
+                byte_idx.put(0)
+            } else {
+                word_buf.put(w >> 8)
+                byte_idx.put(idx + 1)
+            }
+        }
+    }
+}
+
+-- SpiCmdDecoder: command protocol state machine (SPI domain).
+-- First byte after CSB drop is the command byte:
+--   bit[7]   = 1 for write, 0 for read
+--   bit[6:0] = register address
+-- Write: next byte is the data payload, forwarded to system domain.
+-- Read:  response comes from sys2spi CDC queue.
+-- Bulk read: intercepts REG_BULK_RD_L/H, streams bytes from
+--   SpiBulkDeserializer directly without crossing to sys domain.
+--
+-- Phase encoding:
+--   0 = IDLE
+--   1 = GOT_WRITE_CMD — forwarded cmd byte, waiting for data byte
+--   2 = BULK_RD_LEN_L — got bulk read addr, waiting for len low
+--   3 = BULK_RD_LEN_H — got len low, waiting for len high
+--   4 = BULK_SEND — streaming bulk read bytes to MISO
+--   5 = WAIT_READ_RESP — waiting for register read response
+
+process SpiCmdDecoder {
+    consumes: spi_byte     : Queue(Bits 8)
+    produces: spi2sys      : Queue(Bits 8)
+    consumes: sys2spi      : Queue(Bits 8)
+    consumes: bulk_byte    : Queue(Bits 8)
+    produces: miso_byte    : Queue(Bits 8)
+    state:    phase        : Cell(Bits 4, init = 0)
+    state:    cmd_reg      : Cell(Bits 8, init = 0)
+    state:    bulk_len     : Cell(Bits 16, init = 0)
+    state:    bulk_sent    : Cell(Bits 16, init = 0)
+
+    rule tick {
+        let ph = phase.take()
+        let cmd = cmd_reg.take()
+        let blen = bulk_len.take()
+        let bsent = bulk_sent.take()
+
+        if ph == 0 {
+            match spi_byte.try_take() {
+                Some(byte) => {
+                    let is_write = byte[7:7]
+                    let addr = byte[6:0]
+                    if is_write == 1 {
+                        if addr == REG_BULK_RD_L {
+                            phase.put(2)
+                            cmd_reg.put(byte)
+                            bulk_len.put(0)
+                            bulk_sent.put(0)
+                        } else {
+                            spi2sys.put(byte)
+                            phase.put(1)
+                            cmd_reg.put(byte)
+                            bulk_len.put(blen)
+                            bulk_sent.put(bsent)
+                        }
+                    } else {
+                        spi2sys.put(byte)
+                        phase.put(5)
+                        cmd_reg.put(byte)
+                        bulk_len.put(blen)
+                        bulk_sent.put(bsent)
+                    }
+                }
+                None => {
+                    phase.put(0)
+                    cmd_reg.put(cmd)
+                    bulk_len.put(blen)
+                    bulk_sent.put(bsent)
+                }
+            }
+        } else {
+            if ph == 1 {
+                match spi_byte.try_take() {
+                    Some(byte) => {
+                        spi2sys.put(byte)
+                        phase.put(0)
+                        cmd_reg.put(cmd)
+                        bulk_len.put(blen)
+                        bulk_sent.put(bsent)
+                    }
+                    None => {
+                        phase.put(1)
+                        cmd_reg.put(cmd)
+                        bulk_len.put(blen)
+                        bulk_sent.put(bsent)
+                    }
+                }
+            } else {
+                if ph == 2 {
+                    match spi_byte.try_take() {
+                        Some(byte) => {
+                            phase.put(3)
+                            cmd_reg.put(cmd)
+                            bulk_len.put(byte)
+                            bulk_sent.put(0)
+                        }
+                        None => {
+                            phase.put(2)
+                            cmd_reg.put(cmd)
+                            bulk_len.put(blen)
+                            bulk_sent.put(bsent)
+                        }
+                    }
+                } else {
+                    if ph == 3 {
+                        match spi_byte.try_take() {
+                            Some(byte) => {
+                                phase.put(4)
+                                cmd_reg.put(cmd)
+                                bulk_len.put(blen | (byte << 8))
+                                bulk_sent.put(0)
+                            }
+                            None => {
+                                phase.put(3)
+                                cmd_reg.put(cmd)
+                                bulk_len.put(blen)
+                                bulk_sent.put(bsent)
+                            }
+                        }
+                    } else {
+                        if ph == 4 {
+                            if bsent == blen {
+                                phase.put(0)
+                                cmd_reg.put(0)
+                                bulk_len.put(0)
+                                bulk_sent.put(0)
+                            } else {
+                                match bulk_byte.try_take() {
+                                    Some(byte) => {
+                                        miso_byte.put(byte)
+                                        phase.put(4)
+                                        cmd_reg.put(cmd)
+                                        bulk_len.put(blen)
+                                        bulk_sent.put(bsent + 1)
+                                    }
+                                    None => {
+                                        phase.put(4)
+                                        cmd_reg.put(cmd)
+                                        bulk_len.put(blen)
+                                        bulk_sent.put(bsent)
+                                    }
+                                }
+                            }
+                        } else {
+                            match sys2spi.try_take() {
+                                Some(byte) => {
+                                    miso_byte.put(byte)
+                                    phase.put(0)
+                                    cmd_reg.put(0)
+                                    bulk_len.put(blen)
+                                    bulk_sent.put(bsent)
+                                }
+                                None => {
+                                    phase.put(5)
+                                    cmd_reg.put(cmd)
+                                    bulk_len.put(blen)
+                                    bulk_sent.put(bsent)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- System Domain Processes
+-- ============================================================
+
+-- SpiRegMap: register map + command routing (system domain).
+-- Receives command+data byte pairs from the SPI domain via spi2sys.
+-- When a write to REG_TL_CMD arrives, captures the current address
+-- and length registers into a TlCmd record and sends it to TlFsm.
+--
+-- Phase encoding:
+--   0 = IDLE — waiting for command byte
+--   1 = WRITE_DATA — waiting for write data byte
+
+process SpiRegMap {
+    consumes: spi_in      : Queue(Bits 8)
+    produces: spi_out     : Queue(Bits 8)
+    produces: tl_cmd      : Queue(TlCmd)
+    produces: buf_wr      : Queue(Bits 8)
+    state:    phase       : Cell(Bits 4, init = 0)
+    state:    cmd_addr    : Cell(Bits 7, init = 0)
+    state:    addr0       : Cell(Bits 8, init = 0)
+    state:    addr1       : Cell(Bits 8, init = 0)
+    state:    addr2       : Cell(Bits 8, init = 0)
+    state:    addr3       : Cell(Bits 8, init = 0)
+    state:    len_l       : Cell(Bits 8, init = 0)
+    state:    len_h       : Cell(Bits 8, init = 0)
+    state:    tl_status   : Cell(Bits 8, init = 0)
+    state:    wr_status   : Cell(Bits 8, init = 0)
+
+    rule tick {
+        let ph = phase.take()
+        let ca = cmd_addr.take()
+        let a0 = addr0.take()
+        let a1 = addr1.take()
+        let a2 = addr2.take()
+        let a3 = addr3.take()
+        let ll = len_l.take()
+        let lh = len_h.take()
+        let ts = tl_status.take()
+        let ws = wr_status.take()
+
+        if ph == 0 {
+            match spi_in.try_take() {
+                Some(byte) => {
+                    let is_write = byte[7:7]
+                    let addr = byte[6:0]
+                    if is_write == 1 {
+                        phase.put(1)
+                        cmd_addr.put(addr)
+                    } else {
+                        -- Read: send register value back via sys2spi
+                        if addr == REG_TL_ADDR_0 { spi_out.put(a0) }
+                        else {
+                            if addr == REG_TL_ADDR_1 { spi_out.put(a1) }
+                            else {
+                                if addr == REG_TL_ADDR_2 { spi_out.put(a2) }
+                                else {
+                                    if addr == REG_TL_ADDR_3 { spi_out.put(a3) }
+                                    else {
+                                        if addr == REG_TL_LEN_L { spi_out.put(ll) }
+                                        else {
+                                            if addr == REG_TL_LEN_H { spi_out.put(lh) }
+                                            else {
+                                                if addr == REG_TL_STATUS { spi_out.put(ts) }
+                                                else {
+                                                    if addr == REG_WR_STATUS { spi_out.put(ws) }
+                                                    else { spi_out.put(0) }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        phase.put(0)
+                        cmd_addr.put(ca)
+                    }
+                    addr0.put(a0)
+                    addr1.put(a1)
+                    addr2.put(a2)
+                    addr3.put(a3)
+                    len_l.put(ll)
+                    len_h.put(lh)
+                    tl_status.put(ts)
+                    wr_status.put(ws)
+                }
+                None => {
+                    phase.put(0)
+                    cmd_addr.put(ca)
+                    addr0.put(a0)
+                    addr1.put(a1)
+                    addr2.put(a2)
+                    addr3.put(a3)
+                    len_l.put(ll)
+                    len_h.put(lh)
+                    tl_status.put(ts)
+                    wr_status.put(ws)
+                }
+            }
+        } else {
+            if ph == 1 {
+                match spi_in.try_take() {
+                    Some(data) => {
+                        -- Update the targeted register; others keep old value
+                        if ca == REG_TL_ADDR_0 {
+                            addr0.put(data)
+                            addr1.put(a1)
+                            addr2.put(a2)
+                            addr3.put(a3)
+                            len_l.put(ll)
+                            len_h.put(lh)
+                        } else {
+                            if ca == REG_TL_ADDR_1 {
+                                addr0.put(a0)
+                                addr1.put(data)
+                                addr2.put(a2)
+                                addr3.put(a3)
+                                len_l.put(ll)
+                                len_h.put(lh)
+                            } else {
+                                if ca == REG_TL_ADDR_2 {
+                                    addr0.put(a0)
+                                    addr1.put(a1)
+                                    addr2.put(data)
+                                    addr3.put(a3)
+                                    len_l.put(ll)
+                                    len_h.put(lh)
+                                } else {
+                                    if ca == REG_TL_ADDR_3 {
+                                        addr0.put(a0)
+                                        addr1.put(a1)
+                                        addr2.put(a2)
+                                        addr3.put(data)
+                                        len_l.put(ll)
+                                        len_h.put(lh)
+                                    } else {
+                                        if ca == REG_TL_LEN_L {
+                                            addr0.put(a0)
+                                            addr1.put(a1)
+                                            addr2.put(a2)
+                                            addr3.put(a3)
+                                            len_l.put(data)
+                                            len_h.put(lh)
+                                        } else {
+                                            if ca == REG_TL_LEN_H {
+                                                addr0.put(a0)
+                                                addr1.put(a1)
+                                                addr2.put(a2)
+                                                addr3.put(a3)
+                                                len_l.put(ll)
+                                                len_h.put(data)
+                                            } else {
+                                                addr0.put(a0)
+                                                addr1.put(a1)
+                                                addr2.put(a2)
+                                                addr3.put(a3)
+                                                len_l.put(ll)
+                                                len_h.put(lh)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        -- Dispatch side effects
+                        -- Note: SPI host always writes addr/len BEFORE cmd,
+                        -- so a0-a3/ll/lh already hold the correct values.
+                        if ca == REG_TL_CMD {
+                            tl_cmd.put(TlCmd {
+                                op   = data,
+                                addr = a0 | (a1 << 8) | (a2 << 16) | (a3 << 24),
+                                len  = ll | (lh << 8)
+                            })
+                        } else {
+                            if ca == REG_DATA_BUF {
+                                buf_wr.put(data)
+                            } else {
+                                -- Other register writes: no additional side effects
+                            }
+                        }
+                        tl_status.put(ts)
+                        wr_status.put(ws)
+                        phase.put(0)
+                        cmd_addr.put(ca)
+                    }
+                    None => {
+                        phase.put(1)
+                        cmd_addr.put(ca)
+                        addr0.put(a0)
+                        addr1.put(a1)
+                        addr2.put(a2)
+                        addr3.put(a3)
+                        len_l.put(ll)
+                        len_h.put(lh)
+                        tl_status.put(ts)
+                        wr_status.put(ws)
+                    }
+                }
+            } else {
+                phase.put(0)
+                cmd_addr.put(ca)
+                addr0.put(a0)
+                addr1.put(a1)
+                addr2.put(a2)
+                addr3.put(a3)
+                len_l.put(ll)
+                len_h.put(lh)
+                tl_status.put(ts)
+                wr_status.put(ws)
+            }
+        }
+    }
+}
+
+-- TlFsm: unified TileLink read + write FSM (system domain).
+-- Receives TlCmd records from SpiRegMap with captured address/length.
+-- op encoding: 0 = clear, 1 = read (Get), 2 = write (PutFullData).
+--
+-- Phase encoding:
+--   0 = IDLE
+--   1 = READ_SEND — issuing TL Get on A channel
+--   2 = READ_WAIT — waiting for D channel response
+--   3 = READ_DONE — all beats received, waiting for clear
+--   4 = WRITE_SEND — issuing TL PutFullData on A channel
+--   5 = WRITE_WAIT — waiting for D channel ack
+--   6 = WRITE_DONE — all beats acked, waiting for clear
+--   7 = ERROR — TL error, waiting for clear
+
+process TlFsm {
+    consumes: cmd         : Queue(TlCmd)
+    produces: tl_a        : Queue(TlA)
+    consumes: tl_d        : Queue(TlD)
+    produces: bulk_data   : Queue(Bits 128)
+    state:    phase       : Cell(Bits 4, init = 0)
+    state:    tl_addr     : Cell(Bits 32, init = 0)
+    state:    tl_len      : Cell(Bits 16, init = 0)
+    state:    beat_count  : Cell(Bits 16, init = 0)
+
+    rule tick {
+        let ph = phase.take()
+        let ta = tl_addr.take()
+        let tl = tl_len.take()
+        let bc = beat_count.take()
+
+        if ph == 0 {
+            match cmd.try_take() {
+                Some(c) => {
+                    if c.op == 1 {
+                        phase.put(1)
+                        tl_addr.put(c.addr)
+                        tl_len.put(c.len)
+                        beat_count.put(0)
+                    } else {
+                        if c.op == 2 {
+                            phase.put(4)
+                            tl_addr.put(c.addr)
+                            tl_len.put(c.len)
+                            beat_count.put(0)
+                        } else {
+                            phase.put(0)
+                            tl_addr.put(ta)
+                            tl_len.put(tl)
+                            beat_count.put(0)
+                        }
+                    }
+                }
+                None => {
+                    phase.put(0)
+                    tl_addr.put(ta)
+                    tl_len.put(tl)
+                    beat_count.put(bc)
+                }
+            }
+        } else {
+            if ph == 1 {
+                -- READ_SEND: issue TL Get
+                tl_a.put(TlA {
+                    opcode  = TL_GET,
+                    size    = TL_SIZE,
+                    source  = 0,
+                    address = ta + (bc << 4),
+                    mask    = 0xFFFF,
+                    data    = 0
+                })
+                phase.put(2)
+                tl_addr.put(ta)
+                tl_len.put(tl)
+                beat_count.put(bc)
+            } else {
+                if ph == 2 {
+                    -- READ_WAIT: wait for D channel response
+                    match tl_d.try_take() {
+                        Some(resp) => {
+                            if resp.error {
+                                phase.put(7)
+                                tl_addr.put(ta)
+                                tl_len.put(tl)
+                                beat_count.put(bc)
+                            } else {
+                                bulk_data.put(resp.data)
+                                if bc == tl {
+                                    phase.put(3)
+                                    tl_addr.put(ta)
+                                    tl_len.put(tl)
+                                    beat_count.put(bc + 1)
+                                } else {
+                                    phase.put(1)
+                                    tl_addr.put(ta)
+                                    tl_len.put(tl)
+                                    beat_count.put(bc + 1)
+                                }
+                            }
+                        }
+                        None => {
+                            phase.put(2)
+                            tl_addr.put(ta)
+                            tl_len.put(tl)
+                            beat_count.put(bc)
+                        }
+                    }
+                } else {
+                    if ph == 3 {
+                        -- READ_DONE: wait for clear
+                        match cmd.try_take() {
+                            Some(c) => {
+                                if c.op == 0 {
+                                    phase.put(0)
+                                } else {
+                                    phase.put(3)
+                                }
+                                tl_addr.put(ta)
+                                tl_len.put(tl)
+                                beat_count.put(bc)
+                            }
+                            None => {
+                                phase.put(3)
+                                tl_addr.put(ta)
+                                tl_len.put(tl)
+                                beat_count.put(bc)
+                            }
+                        }
+                    } else {
+                        if ph == 4 {
+                            -- WRITE_SEND: issue TL PutFullData
+                            tl_a.put(TlA {
+                                opcode  = TL_PUT_FULL,
+                                size    = TL_SIZE,
+                                source  = 0,
+                                address = ta + (bc << 4),
+                                mask    = 0xFFFF,
+                                data    = 0
+                            })
+                            phase.put(5)
+                            tl_addr.put(ta)
+                            tl_len.put(tl)
+                            beat_count.put(bc)
+                        } else {
+                            if ph == 5 {
+                                -- WRITE_WAIT: wait for D channel ack
+                                match tl_d.try_take() {
+                                    Some(resp) => {
+                                        if resp.error {
+                                            phase.put(7)
+                                        } else {
+                                            if bc == tl {
+                                                phase.put(6)
+                                            } else {
+                                                phase.put(4)
+                                            }
+                                        }
+                                        tl_addr.put(ta)
+                                        tl_len.put(tl)
+                                        beat_count.put(bc + 1)
+                                    }
+                                    None => {
+                                        phase.put(5)
+                                        tl_addr.put(ta)
+                                        tl_len.put(tl)
+                                        beat_count.put(bc)
+                                    }
+                                }
+                            } else {
+                                if ph == 6 {
+                                    -- WRITE_DONE: wait for clear
+                                    match cmd.try_take() {
+                                        Some(c) => {
+                                            if c.op == 0 {
+                                                phase.put(0)
+                                            } else {
+                                                phase.put(6)
+                                            }
+                                            tl_addr.put(ta)
+                                            tl_len.put(tl)
+                                            beat_count.put(bc)
+                                        }
+                                        None => {
+                                            phase.put(6)
+                                            tl_addr.put(ta)
+                                            tl_len.put(tl)
+                                            beat_count.put(bc)
+                                        }
+                                    }
+                                } else {
+                                    -- ERROR: wait for clear
+                                    match cmd.try_take() {
+                                        Some(c) => {
+                                            if c.op == 0 {
+                                                phase.put(0)
+                                            } else {
+                                                phase.put(7)
+                                            }
+                                            tl_addr.put(ta)
+                                            tl_len.put(tl)
+                                            beat_count.put(bc)
+                                        }
+                                        None => {
+                                            phase.put(7)
+                                            tl_addr.put(ta)
+                                            tl_len.put(tl)
+                                            beat_count.put(bc)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+-- WriteBuffer: accumulates bytes into 128-bit words (system domain).
+-- Receives single-byte writes from SpiRegMap, packs them into a
+-- Cell-based accumulator. After 16 bytes the word is complete.
+
+process WriteBuffer {
+    consumes: byte_write : Queue(Bits 8)
+    state:    word_acc   : Cell(Bits 128, init = 0)
+    state:    byte_ptr   : Cell(Bits 5, init = 0)
+    state:    word_idx   : Cell(Bits 16, init = 0)
+
+    rule tick {
+        let acc = word_acc.take()
+        let bp = byte_ptr.take()
+        let wi = word_idx.take()
+
+        match byte_write.try_take() {
+            Some(data) => {
+                let shift = bp << 3
+                let new_acc = acc | (data << shift)
+                if bp == 15 {
+                    word_acc.put(0)
+                    byte_ptr.put(0)
+                    word_idx.put(wi + 1)
+                } else {
+                    word_acc.put(new_acc)
+                    byte_ptr.put(bp + 1)
+                    word_idx.put(wi)
+                }
+            }
+            None => {
+                word_acc.put(acc)
+                byte_ptr.put(bp)
+                word_idx.put(wi)
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- Top-Level Pipe: Spi2TLUL
+-- ============================================================
+
+pipe Spi2TLUL {
+    domain spi : Clock
+
+    -- SPI pins (external queues — become module ports)
+    let mosi_pin = external Queue(Bits 1, depth = 1)
+    let miso_pin = external Queue(Bits 1, depth = 1)
+
+    -- TileLink channels (external queues — module ports)
+    let tl_a = external Queue(TlA, depth = 1)
+    let tl_d = external Queue(TlD, depth = 1)
+
+    -- CDC: SPI → system (command + data bytes)
+    let spi2sys = AsyncQueue(Bits 8, depth = 4)
+    -- CDC: system → SPI (register read responses)
+    let sys2spi = AsyncQueue(Bits 8, depth = 2)
+    -- CDC: system → SPI (bulk read data, 128-bit words)
+    let bulk_data_cdc = AsyncQueue(Bits 128, depth = 4)
+
+    -- Internal SPI-domain queues
+    let spi_byte_q  = Queue(Bits 8, depth = 1)
+    let miso_byte_q = Queue(Bits 8, depth = 2)
+    let bulk_byte_q = Queue(Bits 8, depth = 4)
+
+    -- Internal system-domain queues
+    let tl_cmd_q = Queue(TlCmd, depth = 1)
+    let buf_wr_q = Queue(Bits 8, depth = 2)
+
+    -- SPI domain instances
+    SpiByteAssembler [spi] { mosi_pin = mosi_pin, spi_byte = spi_byte_q }
+    SpiCmdDecoder [spi] {
+        spi_byte  = spi_byte_q,
+        spi2sys   = spi2sys,
+        sys2spi   = sys2spi,
+        bulk_byte = bulk_byte_q,
+        miso_byte = miso_byte_q
+    }
+    SpiBulkDeserializer [spi] { bulk_word = bulk_data_cdc, bulk_byte = bulk_byte_q }
+    SpiMisoShifter [spi] { miso_byte = miso_byte_q, miso_pin = miso_pin }
+
+    -- System domain instances (default domain)
+    SpiRegMap {
+        spi_in    = spi2sys,
+        spi_out   = sys2spi,
+        tl_cmd    = tl_cmd_q,
+        buf_wr    = buf_wr_q
+    }
+    TlFsm {
+        cmd       = tl_cmd_q,
+        tl_a      = tl_a,
+        tl_d      = tl_d,
+        bulk_data = bulk_data_cdc
+    }
+    WriteBuffer { byte_write = buf_wr_q }
+}
