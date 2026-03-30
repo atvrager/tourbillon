@@ -15,12 +15,17 @@ class Top extends Module {
   val r_Consumer_go_can_fire = q_q.io.deq.valid
   val r_Consumer_go_will_fire = r_Consumer_go_can_fire
 
+  q_q.io.enq.valid := false.B
+  q_q.io.enq.bits := 0.U
+
   // Rule: Producer.go
-  val q_q_go_enq_val = 42.U
+  when (r_Producer_go_will_fire) {
+    q_q.io.enq.bits := 42.U
+    q_q.io.enq.valid := true.B
+  }
   // Rule: Consumer.go
+  when (r_Consumer_go_will_fire) {
+  }
 
   q_q.io.deq.ready := r_Consumer_go_will_fire
-  q_q.io.enq.valid := r_Producer_go_will_fire
-  q_q.io.enq.bits := Mux(r_Producer_go_will_fire, q_q_go_enq_val, 0.U)
-
 }

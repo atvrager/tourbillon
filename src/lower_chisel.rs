@@ -1,5 +1,4 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fmt::Write;
 
 use petgraph::graph::{EdgeIndex, NodeIndex};
 
@@ -183,37 +182,28 @@ impl<'a> ChiselEmitter<'a> {
         self.line("import chisel3.util._");
         self.blank();
 
-        // Emit type definitions (Bundle classes, ChiselEnum objects)
+        // Type definitions (Bundle classes, ChiselEnum objects)
         self.emit_type_declarations();
 
         // Module
         self.line(&format!("class {pipe_name} extends Module {{"));
         self.indent();
 
-        // IO bundle
         self.emit_io_bundle();
         self.blank();
-
-        // Constants
         self.emit_constants();
-
-        // Cell declarations (RegInit)
         self.emit_cell_declarations();
-
-        // Queue instances
         self.emit_queue_instances();
-
-        // Rule enables (can_fire / will_fire)
         self.emit_rule_enables();
 
-        // Rule body logic — compute next values
+        // Default assignments (mirrors SV always_comb defaults)
+        self.emit_defaults();
+
+        // Rule bodies inside when(will_fire) blocks
         self.emit_rule_logic();
 
-        // Cell writebacks (single := with Mux)
-        self.emit_cell_writebacks();
-
-        // Queue wiring (enq/deq)
-        self.emit_queue_wiring();
+        // deq_ready wiring (assign-style)
+        self.emit_deq_ready_wiring();
 
         self.dedent();
         self.line("}");
@@ -222,7 +212,7 @@ impl<'a> ChiselEmitter<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // Type declarations (Bundle, ChiselEnum)
+    // Type declarations
     // -----------------------------------------------------------------------
 
     fn emit_type_declarations(&mut self) {
@@ -263,7 +253,7 @@ impl<'a> ChiselEmitter<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // IO bundle (external queues, memory ports, domain clocks)
+    // IO bundle
     // -----------------------------------------------------------------------
 
     fn emit_io_bundle(&mut self) {
@@ -294,10 +284,8 @@ impl<'a> ChiselEmitter<'a> {
             let chisel_data_type = chisel_uint(w);
 
             if *cpu_is_writer {
-                // CPU writes -> expose as Decoupled output
                 ports.push(format!("val q_{sname} = Decoupled({chisel_data_type})"));
             } else {
-                // CPU reads -> expose as Flipped(Decoupled) input
                 ports.push(format!(
                     "val q_{sname} = Flipped(Decoupled({chisel_data_type}))"
                 ));
@@ -328,6 +316,7 @@ impl<'a> ChiselEmitter<'a> {
     // -----------------------------------------------------------------------
 
     fn emit_cell_declarations(&mut self) {
+        let mut any = false;
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
             if let QueueEdgeKind::Cell { init, .. } = &edge.kind {
@@ -335,21 +324,16 @@ impl<'a> ChiselEmitter<'a> {
                 let w = bit_width(&edge.elem_ty);
                 let init_val = init.map_or("0".to_string(), |v| format!("{v}"));
                 self.line(&format!("val c_{sname} = RegInit({init_val}.U({w}.W))"));
+                any = true;
             }
         }
-        let has_cells = self
-            .net
-            .network
-            .graph
-            .edge_weights()
-            .any(|e| matches!(e.kind, QueueEdgeKind::Cell { .. }));
-        if has_cells {
+        if any {
             self.blank();
         }
     }
 
     // -----------------------------------------------------------------------
-    // Queue instances (Module(new Queue(...)))
+    // Queue instances
     // -----------------------------------------------------------------------
 
     fn emit_queue_instances(&mut self) {
@@ -365,24 +349,20 @@ impl<'a> ChiselEmitter<'a> {
             let w = bit_width(&edge.elem_ty);
 
             if matches!(edge.kind, QueueEdgeKind::AsyncQueue) {
-                // AsyncQueue -> BlackBox wrapping tbn_async_fifo
                 self.line(&format!("// AsyncQueue: {}", edge.name));
                 self.line(&format!(
-                    "val aq_{sname} = Module(new TbnAsyncFifo({w}, {}))",
+                    "val q_{sname} = Module(new TbnAsyncFifo({w}, {}))",
                     edge.depth
                 ));
             } else {
-                let kind_label = "Queue";
                 let init_count = match &edge.kind {
                     QueueEdgeKind::Queue { init_tokens, .. } if *init_tokens > 0 => {
                         Some(*init_tokens)
                     }
                     _ => None,
                 };
-                self.line(&format!("// {kind_label}: {}", edge.name));
-                if let Some(_count) = init_count {
-                    // Chisel Queue doesn't support pre-loaded tokens.
-                    // Emit a standard Queue with a TODO comment.
+                self.line(&format!("// Queue: {}", edge.name));
+                if init_count.is_some() {
                     self.line("// TODO: init tokens not directly supported in Chisel Queue");
                 }
                 self.line(&format!(
@@ -429,7 +409,6 @@ impl<'a> ChiselEmitter<'a> {
                 for &rule_idx in &rule_indices {
                     let rule_name = &node.rules[rule_idx].name.node;
 
-                    // can_fire = conjunction of queue readiness conditions
                     let mut conditions = vec![];
 
                     for take_port in &blocking_takes[rule_idx] {
@@ -437,11 +416,7 @@ impl<'a> ChiselEmitter<'a> {
                             let edge = &self.net.network.graph[edge_idx];
                             if is_queue_like(&edge.kind) {
                                 let sname = sanitize(&edge.name);
-                                if self.memory_edges.contains_key(&edge_idx) {
-                                    conditions.push(format!("io.q_{sname}.valid"));
-                                } else {
-                                    conditions.push(format!("q_{sname}.io.deq.valid"));
-                                }
+                                conditions.push(self.queue_deq_valid(&sname, edge_idx));
                             }
                         }
                     }
@@ -451,11 +426,7 @@ impl<'a> ChiselEmitter<'a> {
                             let edge = &self.net.network.graph[edge_idx];
                             if is_queue_like(&edge.kind) {
                                 let sname = sanitize(&edge.name);
-                                if self.memory_edges.contains_key(&edge_idx) {
-                                    conditions.push(format!("io.q_{sname}.ready"));
-                                } else {
-                                    conditions.push(format!("q_{sname}.io.enq.ready"));
-                                }
+                                conditions.push(self.queue_enq_ready(&sname, edge_idx));
                             }
                         }
                     }
@@ -496,7 +467,47 @@ impl<'a> ChiselEmitter<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // Rule body logic — compute next values as expression trees
+    // Default assignments (mirrors SV always_comb defaults)
+    // -----------------------------------------------------------------------
+
+    fn emit_defaults(&mut self) {
+        // Cell defaults: c_NAME := c_NAME (identity — overridden in when blocks)
+        for edge_idx in self.net.network.graph.edge_indices() {
+            let edge = &self.net.network.graph[edge_idx];
+            if matches!(edge.kind, QueueEdgeKind::Cell { .. }) {
+                let sname = sanitize(&edge.name);
+                self.line(&format!("c_{sname} := c_{sname}"));
+            }
+        }
+
+        // Queue enq defaults
+        for edge_idx in self.net.network.graph.edge_indices() {
+            let edge = &self.net.network.graph[edge_idx];
+            if is_queue_like(&edge.kind) {
+                if let Some(&cpu_is_writer) = self.memory_edges.get(&edge_idx)
+                    && !cpu_is_writer
+                {
+                    continue;
+                }
+                let sname = sanitize(&edge.name);
+                let (enq_valid, enq_bits) = self.queue_enq_signals(&sname, edge_idx);
+                self.line(&format!("{enq_valid} := false.B"));
+                self.line(&format!("{enq_bits} := 0.U"));
+            }
+        }
+
+        // try_take-only deq_ready defaults
+        for &ei in &self.try_take_only_edges.clone() {
+            let sname = sanitize(&self.net.network.graph[ei].name);
+            let deq_ready = self.queue_deq_ready_signal(&sname, ei);
+            self.line(&format!("{deq_ready} := false.B"));
+        }
+
+        self.blank();
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule body logic — when(will_fire) blocks
     // -----------------------------------------------------------------------
 
     fn emit_rule_logic(&mut self) {
@@ -535,9 +546,15 @@ impl<'a> ChiselEmitter<'a> {
                     };
 
                     self.line(&format!("// Rule: {inst}.{rule_name}"));
+                    self.line(&format!("when (r_{inst}_{rule_name}_will_fire) {{"));
+                    self.indent();
+
                     for stmt in &rule.body {
                         self.emit_stmt(&stmt.node, &mut ctx);
                     }
+
+                    self.dedent();
+                    self.line("}");
                 }
             }
         }
@@ -545,159 +562,11 @@ impl<'a> ChiselEmitter<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // Cell writebacks (single Mux assignment per cell)
+    // deq_ready wiring
     // -----------------------------------------------------------------------
 
-    fn emit_cell_writebacks(&mut self) {
-        // Collect all rules that write to each cell, with their will_fire signals
-        // and the computed next-value expression names.
-        let mut cell_writers: HashMap<EdgeIndex, Vec<(String, String)>> = HashMap::new();
-
-        for node_idx in self.net.network.graph.node_indices() {
-            if self.memory_stub_nodes.contains(&node_idx) {
-                continue;
-            }
-            let node = &self.net.network.graph[node_idx];
-            let inst = &node.instance_name;
-
-            let port_edges: HashMap<String, EdgeIndex> = node
-                .ports
-                .iter()
-                .filter_map(|p| p.bound_to.map(|e| (p.name.clone(), e)))
-                .collect();
-
-            for rule in &node.rules {
-                let rule_name = &rule.name.node;
-                let will_fire = format!("r_{inst}_{rule_name}_will_fire");
-
-                // Check which cell ports this rule puts to
-                self.collect_rule_cell_puts(rule, &port_edges, &will_fire, &mut cell_writers);
-            }
-        }
-
-        // Emit single := per cell
-        for edge_idx in self.net.network.graph.edge_indices() {
-            let edge = &self.net.network.graph[edge_idx];
-            if !matches!(edge.kind, QueueEdgeKind::Cell { .. }) {
-                continue;
-            }
-            let sname = sanitize(&edge.name);
-
-            if let Some(writers) = cell_writers.get(&edge_idx) {
-                if writers.len() == 1 {
-                    let (wf, val_name) = &writers[0];
-                    self.line(&format!("c_{sname} := Mux({wf}, {val_name}, c_{sname})"));
-                } else {
-                    // Multiple writers -> MuxCase
-                    let mut cases = String::new();
-                    for (i, (wf, val_name)) in writers.iter().enumerate() {
-                        if i > 0 {
-                            cases.push_str(", ");
-                        }
-                        write!(cases, "{wf} -> {val_name}").unwrap();
-                    }
-                    self.line(&format!("c_{sname} := MuxCase(c_{sname}, Seq({cases}))"));
-                }
-            }
-        }
-
-        let has_cells = self
-            .net
-            .network
-            .graph
-            .edge_weights()
-            .any(|e| matches!(e.kind, QueueEdgeKind::Cell { .. }));
-        if has_cells {
-            self.blank();
-        }
-    }
-
-    /// Collect which cell edges a rule writes to (from Put statements).
-    fn collect_rule_cell_puts(
-        &self,
-        rule: &Rule,
-        port_edges: &HashMap<String, EdgeIndex>,
-        will_fire: &str,
-        cell_writers: &mut HashMap<EdgeIndex, Vec<(String, String)>>,
-    ) {
-        let rule_name = &rule.name.node;
-        for stmt in &rule.body {
-            self.collect_puts_from_stmt(&stmt.node, port_edges, will_fire, rule_name, cell_writers);
-        }
-    }
-
-    fn collect_puts_from_stmt(
-        &self,
-        stmt: &Stmt,
-        port_edges: &HashMap<String, EdgeIndex>,
-        will_fire: &str,
-        rule_name: &str,
-        cell_writers: &mut HashMap<EdgeIndex, Vec<(String, String)>>,
-    ) {
-        match stmt {
-            Stmt::Put { target, .. } => {
-                if let Some(&edge_idx) = port_edges.get(&target.node) {
-                    let edge = &self.net.network.graph[edge_idx];
-                    if matches!(edge.kind, QueueEdgeKind::Cell { .. }) {
-                        let sname = sanitize(&edge.name);
-                        let val_name = format!("c_{sname}_{rule_name}_next");
-                        cell_writers
-                            .entry(edge_idx)
-                            .or_default()
-                            .push((will_fire.to_string(), val_name));
-                    }
-                }
-            }
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                for s in then_body {
-                    self.collect_puts_from_stmt(
-                        &s.node,
-                        port_edges,
-                        will_fire,
-                        rule_name,
-                        cell_writers,
-                    );
-                }
-                for s in else_body {
-                    self.collect_puts_from_stmt(
-                        &s.node,
-                        port_edges,
-                        will_fire,
-                        rule_name,
-                        cell_writers,
-                    );
-                }
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    for s in &arm.body {
-                        self.collect_puts_from_stmt(
-                            &s.node,
-                            port_edges,
-                            will_fire,
-                            rule_name,
-                            cell_writers,
-                        );
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Queue wiring (enq/deq assignments)
-    // -----------------------------------------------------------------------
-
-    fn emit_queue_wiring(&mut self) {
-        // Collect deq_ready drivers per queue
+    fn emit_deq_ready_wiring(&mut self) {
         let mut deq_ready_drivers: HashMap<EdgeIndex, Vec<String>> = HashMap::new();
-        // Collect enq drivers per queue
-        let mut enq_drivers: HashMap<EdgeIndex, Vec<(String, String)>> = HashMap::new();
 
         for node_idx in self.net.network.graph.node_indices() {
             if self.memory_stub_nodes.contains(&node_idx) {
@@ -714,10 +583,8 @@ impl<'a> ChiselEmitter<'a> {
 
             for rule in &node.rules {
                 let rule_name = &rule.name.node;
-                let will_fire = format!("r_{inst}_{rule_name}_will_fire");
-
-                // Blocking takes -> deq_ready
                 let blocking = collect_blocking_takes(rule);
+
                 for port_name in &blocking {
                     if let Some(&edge_idx) = port_edges.get(port_name) {
                         let edge = &self.net.network.graph[edge_idx];
@@ -725,156 +592,39 @@ impl<'a> ChiselEmitter<'a> {
                             deq_ready_drivers
                                 .entry(edge_idx)
                                 .or_default()
-                                .push(will_fire.clone());
+                                .push(format!("r_{inst}_{rule_name}_will_fire"));
                         }
                     }
                 }
-
-                // Puts -> enq
-                self.collect_rule_queue_puts(rule, &port_edges, &will_fire, &mut enq_drivers);
             }
         }
 
-        // Emit queue wiring
         for edge_idx in self.net.network.graph.edge_indices() {
             let edge = &self.net.network.graph[edge_idx];
             if !is_queue_like(&edge.kind) {
                 continue;
             }
-            if self.memory_edges.contains_key(&edge_idx) {
+            if let Some(&cpu_is_writer) = self.memory_edges.get(&edge_idx)
+                && cpu_is_writer
+            {
+                continue;
+            }
+            if self.try_take_only_edges.contains(&edge_idx) {
                 continue;
             }
             let sname = sanitize(&edge.name);
-
-            // deq.ready
-            if self.try_take_only_edges.contains(&edge_idx) {
-                // try_take-only: default false, overridden in match arms
-                self.line(&format!("q_{sname}.io.deq.ready := false.B"));
-            } else if let Some(drivers) = deq_ready_drivers.get(&edge_idx) {
+            let deq_ready = self.queue_deq_ready_signal(&sname, edge_idx);
+            if let Some(drivers) = deq_ready_drivers.get(&edge_idx) {
                 let expr = drivers.join(" || ");
-                self.line(&format!("q_{sname}.io.deq.ready := {expr}"));
+                self.line(&format!("{deq_ready} := {expr}"));
             } else {
-                self.line(&format!("q_{sname}.io.deq.ready := false.B"));
+                self.line(&format!("{deq_ready} := false.B"));
             }
-
-            // enq.valid and enq.bits
-            if let Some(writers) = enq_drivers.get(&edge_idx) {
-                if writers.len() == 1 {
-                    let (wf, val_name) = &writers[0];
-                    self.line(&format!("q_{sname}.io.enq.valid := {wf}"));
-                    self.line(&format!(
-                        "q_{sname}.io.enq.bits := Mux({wf}, {val_name}, 0.U)"
-                    ));
-                } else {
-                    let valid_expr: Vec<&str> = writers.iter().map(|(wf, _)| wf.as_str()).collect();
-                    self.line(&format!(
-                        "q_{sname}.io.enq.valid := {}",
-                        valid_expr.join(" || ")
-                    ));
-                    let mut cases = String::new();
-                    for (i, (wf, val_name)) in writers.iter().enumerate() {
-                        if i > 0 {
-                            cases.push_str(", ");
-                        }
-                        write!(cases, "{wf} -> {val_name}").unwrap();
-                    }
-                    self.line(&format!(
-                        "q_{sname}.io.enq.bits := MuxCase(0.U, Seq({cases}))"
-                    ));
-                }
-            } else {
-                self.line(&format!("q_{sname}.io.enq.valid := false.B"));
-                self.line(&format!("q_{sname}.io.enq.bits := 0.U"));
-            }
-            self.blank();
-        }
-    }
-
-    /// Collect which queue edges a rule writes to (from Put statements).
-    fn collect_rule_queue_puts(
-        &self,
-        rule: &Rule,
-        port_edges: &HashMap<String, EdgeIndex>,
-        will_fire: &str,
-        enq_drivers: &mut HashMap<EdgeIndex, Vec<(String, String)>>,
-    ) {
-        let rule_name = &rule.name.node;
-        for stmt in &rule.body {
-            self.collect_queue_puts_from_stmt(
-                &stmt.node,
-                port_edges,
-                will_fire,
-                rule_name,
-                enq_drivers,
-            );
-        }
-    }
-
-    fn collect_queue_puts_from_stmt(
-        &self,
-        stmt: &Stmt,
-        port_edges: &HashMap<String, EdgeIndex>,
-        will_fire: &str,
-        rule_name: &str,
-        enq_drivers: &mut HashMap<EdgeIndex, Vec<(String, String)>>,
-    ) {
-        match stmt {
-            Stmt::Put { target, .. } => {
-                if let Some(&edge_idx) = port_edges.get(&target.node) {
-                    let edge = &self.net.network.graph[edge_idx];
-                    if is_queue_like(&edge.kind) {
-                        let sname = sanitize(&edge.name);
-                        let val_name = format!("q_{sname}_{rule_name}_enq_val");
-                        enq_drivers
-                            .entry(edge_idx)
-                            .or_default()
-                            .push((will_fire.to_string(), val_name));
-                    }
-                }
-            }
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                for s in then_body {
-                    self.collect_queue_puts_from_stmt(
-                        &s.node,
-                        port_edges,
-                        will_fire,
-                        rule_name,
-                        enq_drivers,
-                    );
-                }
-                for s in else_body {
-                    self.collect_queue_puts_from_stmt(
-                        &s.node,
-                        port_edges,
-                        will_fire,
-                        rule_name,
-                        enq_drivers,
-                    );
-                }
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    for s in &arm.body {
-                        self.collect_queue_puts_from_stmt(
-                            &s.node,
-                            port_edges,
-                            will_fire,
-                            rule_name,
-                            enq_drivers,
-                        );
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
     // -----------------------------------------------------------------------
-    // Statement emission
+    // Statement emission (inside when blocks)
     // -----------------------------------------------------------------------
 
     fn emit_stmt(&mut self, stmt: &Stmt, ctx: &mut RuleCtx) {
@@ -889,15 +639,15 @@ impl<'a> ChiselEmitter<'a> {
                     let edge = &self.net.network.graph[edge_idx];
                     let sname = sanitize(&edge.name);
                     let val_chisel = self.emit_expr(&value.node, ctx);
-                    let rn = &ctx.rule_name;
 
                     match &edge.kind {
                         QueueEdgeKind::Cell { .. } => {
-                            // Include rule name to disambiguate multi-rule writers
-                            self.line(&format!("val c_{sname}_{rn}_next = {val_chisel}"));
+                            self.line(&format!("c_{sname} := {val_chisel}"));
                         }
                         QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue => {
-                            self.line(&format!("val q_{sname}_{rn}_enq_val = {val_chisel}"));
+                            let (enq_valid, enq_bits) = self.queue_enq_signals(&sname, edge_idx);
+                            self.line(&format!("{enq_bits} := {val_chisel}"));
+                            self.line(&format!("{enq_valid} := true.B"));
                         }
                     }
                 }
@@ -913,153 +663,212 @@ impl<'a> ChiselEmitter<'a> {
                 then_body,
                 else_body,
             } => {
-                // For if/else that contains puts, we need to emit Mux expressions
-                // For now, emit as nested val definitions with Mux
                 let cond_chisel = self.emit_expr(&cond.node, ctx);
-
-                // Check if this if/else contains puts — if so, we need to produce
-                // conditional next-values. For statements like let bindings inside
-                // branches, we need scoped emission.
-                //
-                // Strategy: collect all puts from both branches, compute the
-                // conditional next-value for each target as Mux(cond, then_val, else_val)
-
-                // First, check for simple cases where branches only contain puts
-                let then_puts = collect_puts_from_body(then_body);
-                let else_puts = collect_puts_from_body(else_body);
-
-                if !then_puts.is_empty() || !else_puts.is_empty() {
-                    // Emit let bindings from both branches (they may compute values)
-                    for s in then_body {
-                        if let Stmt::Let { .. } = &s.node {
-                            self.emit_stmt(&s.node, ctx);
-                        }
-                    }
-                    for s in else_body {
-                        if let Stmt::Let { .. } = &s.node {
-                            self.emit_stmt(&s.node, ctx);
-                        }
-                    }
-
-                    // For each put target, emit Mux
-                    let all_targets: BTreeSet<String> =
-                        then_puts.keys().chain(else_puts.keys()).cloned().collect();
-
-                    let rn = &ctx.rule_name.clone();
-                    for target in &all_targets {
-                        if let Some(&edge_idx) = ctx.port_edges.get(target) {
-                            let edge = &self.net.network.graph[edge_idx];
-                            let sname = sanitize(&edge.name);
-
-                            let then_val = if let Some(val_expr) = then_puts.get(target) {
-                                self.emit_expr(val_expr, ctx)
-                            } else {
-                                match &edge.kind {
-                                    QueueEdgeKind::Cell { .. } => format!("c_{sname}"),
-                                    _ => "0.U".to_string(),
-                                }
-                            };
-
-                            let else_val = if let Some(val_expr) = else_puts.get(target) {
-                                self.emit_expr(val_expr, ctx)
-                            } else {
-                                match &edge.kind {
-                                    QueueEdgeKind::Cell { .. } => format!("c_{sname}"),
-                                    _ => "0.U".to_string(),
-                                }
-                            };
-
-                            match &edge.kind {
-                                QueueEdgeKind::Cell { .. } => {
-                                    self.line(&format!(
-                                        "val c_{sname}_{rn}_next = Mux({cond_chisel}, {then_val}, {else_val})"
-                                    ));
-                                }
-                                _ => {
-                                    self.line(&format!(
-                                        "val q_{sname}_{rn}_enq_val = Mux({cond_chisel}, {then_val}, {else_val})"
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // No puts — just emit the let bindings conditionally
-                    for s in then_body {
-                        self.emit_stmt(&s.node, ctx);
-                    }
-                    for s in else_body {
-                        self.emit_stmt(&s.node, ctx);
-                    }
+                self.line(&format!("when ({cond_chisel}) {{"));
+                self.indent();
+                for s in then_body {
+                    self.emit_stmt(&s.node, ctx);
                 }
+                self.dedent();
+                if !else_body.is_empty() {
+                    self.line("} .otherwise {");
+                    self.indent();
+                    for s in else_body {
+                        self.emit_stmt(&s.node, ctx);
+                    }
+                    self.dedent();
+                }
+                self.line("}");
             }
             Stmt::Match { scrutinee, arms } => {
-                let scrut_chisel = self.emit_expr(&scrutinee.node, ctx);
                 let scrut_ty = self.infer_expr_type(&scrutinee.node, ctx);
 
-                // For try_take match patterns (Option type), emit valid/data extraction
-                if let Ty::Option(inner_ty) = &scrut_ty {
-                    // Extract valid and data from the try_take tuple
-                    // In Chisel, try_take maps to checking queue.io.deq.valid
-                    for arm in arms {
+                // Option type from try_take
+                if let Ty::Option(inner_ty) = &scrut_ty
+                    && let Expr::TryTake { queue } = &scrutinee.node
+                    && let Some(&edge_idx) = ctx.port_edges.get(queue)
+                {
+                    let edge = &self.net.network.graph[edge_idx];
+                    let sname = sanitize(&edge.name);
+                    let valid_signal = self.queue_deq_valid_signal(&sname, edge_idx);
+                    let bits_signal = self.queue_deq_bits_signal(&sname, edge_idx);
+                    let deq_ready = self.queue_deq_ready_signal(&sname, edge_idx);
+
+                    for (i, arm) in arms.iter().enumerate() {
                         match &arm.pattern.node {
                             Pattern::Variant { name, fields } if name == "Some" => {
-                                ctx.pending_deq_readys.clear();
-                                // Extract the queue name from the scrutinee
-                                if let Expr::TryTake { queue } = &scrutinee.node
-                                    && let Some(&edge_idx) = ctx.port_edges.get(queue)
-                                {
-                                    let edge = &self.net.network.graph[edge_idx];
-                                    let sname = sanitize(&edge.name);
-                                    if fields.len() == 1 {
-                                        let data_expr = format!("q_{sname}.io.deq.bits");
-                                        self.bind_pattern(
-                                            &fields[0].node,
-                                            &data_expr,
-                                            inner_ty,
-                                            ctx,
-                                        );
-                                    }
+                                if i == 0 {
+                                    self.line(&format!("when ({valid_signal}) {{"));
+                                } else {
+                                    self.line(&format!("}} .elsewhen ({valid_signal}) {{"));
+                                }
+                                self.indent();
+                                // Assert deq_ready
+                                self.line(&format!("{deq_ready} := true.B"));
+                                // Bind inner value
+                                if fields.len() == 1 {
+                                    self.bind_pattern(&fields[0].node, &bits_signal, inner_ty, ctx);
                                 }
                                 for s in &arm.body {
                                     self.emit_stmt(&s.node, ctx);
                                 }
+                                self.dedent();
                             }
                             Pattern::Variant { name, .. } if name == "None" => {
-                                // Nothing to emit for None arm (no-op when queue empty)
+                                self.line("} .otherwise {");
+                                self.indent();
                                 for s in &arm.body {
                                     self.emit_stmt(&s.node, ctx);
                                 }
+                                self.dedent();
                             }
                             _ => {
+                                self.line("} .otherwise {");
+                                self.indent();
                                 for s in &arm.body {
                                     self.emit_stmt(&s.node, ctx);
                                 }
+                                self.dedent();
                             }
                         }
                     }
-                } else {
-                    // Regular match — emit as MuxLookup or chained Mux
-                    let _ = scrut_chisel;
-                    for arm in arms {
-                        // Bind patterns and emit body
-                        self.bind_pattern(
+                    if !arms.is_empty() {
+                        self.line("}");
+                    }
+                    return;
+                }
+
+                // Enum match
+                if let Ty::Enum { variants, .. } = &scrut_ty {
+                    let scrut_chisel = self.emit_expr(&scrutinee.node, ctx);
+                    let num_variants = variants.len() as u64;
+                    let tag_bits = if num_variants <= 1 {
+                        1
+                    } else {
+                        (num_variants as f64).log2().ceil() as u64
+                    };
+                    let max_payload: u64 = variants
+                        .iter()
+                        .map(|(_, fs)| fs.iter().map(bit_width).sum::<u64>())
+                        .max()
+                        .unwrap_or(0);
+
+                    for (i, arm) in arms.iter().enumerate() {
+                        let cond = self.emit_match_condition(
                             &arm.pattern.node,
-                            &self.emit_expr(&scrutinee.node, ctx),
+                            &scrut_chisel,
                             &scrut_ty,
+                            tag_bits,
+                            max_payload,
                             ctx,
                         );
+                        if i == 0 {
+                            self.line(&format!("when ({cond}) {{"));
+                        } else {
+                            self.line(&format!("}} .elsewhen ({cond}) {{"));
+                        }
+                        self.indent();
                         for s in &arm.body {
                             self.emit_stmt(&s.node, ctx);
                         }
+                        self.dedent();
                     }
+                    if !arms.is_empty() {
+                        self.line("}");
+                    }
+                    return;
+                }
+
+                // Integer/literal match — chained when/elsewhen
+                let scrut_chisel = self.emit_expr(&scrutinee.node, ctx);
+                for (i, arm) in arms.iter().enumerate() {
+                    let cond = match &arm.pattern.node {
+                        Pattern::Literal(Literal::Int(n)) => {
+                            format!("{scrut_chisel} === {n}.U")
+                        }
+                        Pattern::Wildcard => "true.B".to_string(),
+                        Pattern::Bind(name) => {
+                            ctx.vars.insert(name.clone(), scrut_chisel.clone());
+                            ctx.var_types.insert(name.clone(), scrut_ty.clone());
+                            "true.B".to_string()
+                        }
+                        _ => "true.B".to_string(),
+                    };
+                    if i == 0 {
+                        self.line(&format!("when ({cond}) {{"));
+                    } else {
+                        self.line(&format!("}} .elsewhen ({cond}) {{"));
+                    }
+                    self.indent();
+                    for s in &arm.body {
+                        self.emit_stmt(&s.node, ctx);
+                    }
+                    self.dedent();
+                }
+                if !arms.is_empty() {
+                    self.line("}");
                 }
             }
         }
     }
 
     // -----------------------------------------------------------------------
-    // Expression emission (returns Chisel expression string)
+    // Enum match condition
+    // -----------------------------------------------------------------------
+
+    fn emit_match_condition(
+        &self,
+        pattern: &Pattern,
+        scrut_chisel: &str,
+        scrut_ty: &Ty,
+        tag_bits: u64,
+        max_payload: u64,
+        ctx: &mut RuleCtx,
+    ) -> String {
+        match pattern {
+            Pattern::Variant { name, fields } => {
+                if let Ty::Enum { variants, .. } = scrut_ty {
+                    if max_payload == 0 {
+                        // Pure enum
+                        return format!("{scrut_chisel} === {name}");
+                    }
+                    let total_w = tag_bits + max_payload;
+                    let tag_sv = format!("{scrut_chisel}({}, {})", total_w - 1, max_payload);
+                    // Bind payload fields
+                    if let Some((_, variant_fields)) = variants.iter().find(|(vn, _)| vn == name)
+                        && !variant_fields.is_empty()
+                        && !fields.is_empty()
+                    {
+                        let mut offset = 0u64;
+                        for (pat, vty) in fields.iter().zip(variant_fields.iter()).rev() {
+                            let w = bit_width(vty);
+                            let chisel_slice = if w == 1 {
+                                format!("{scrut_chisel}({offset})")
+                            } else {
+                                format!("{scrut_chisel}({}, {})", offset + w - 1, offset)
+                            };
+                            self.bind_pattern(&pat.node, &chisel_slice, vty, ctx);
+                            offset += w;
+                        }
+                    }
+                    format!("{tag_sv} === {name}")
+                } else {
+                    format!("{scrut_chisel} === {name}")
+                }
+            }
+            Pattern::Literal(Literal::Int(n)) => format!("{scrut_chisel} === {n}.U"),
+            Pattern::Wildcard => "true.B".to_string(),
+            Pattern::Bind(name) => {
+                ctx.vars.insert(name.clone(), scrut_chisel.to_string());
+                ctx.var_types.insert(name.clone(), scrut_ty.clone());
+                "true.B".to_string()
+            }
+            _ => "true.B".to_string(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Expression emission
     // -----------------------------------------------------------------------
 
     fn emit_expr(&self, expr: &Expr, ctx: &RuleCtx) -> String {
@@ -1083,11 +892,7 @@ impl<'a> ChiselEmitter<'a> {
                     match &edge.kind {
                         QueueEdgeKind::Cell { .. } => format!("c_{sname}"),
                         QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue => {
-                            if self.memory_edges.contains_key(&edge_idx) {
-                                format!("io.q_{sname}.bits")
-                            } else {
-                                format!("q_{sname}.io.deq.bits")
-                            }
+                            self.queue_deq_bits_signal(&sname, edge_idx)
                         }
                     }
                 } else {
@@ -1104,12 +909,11 @@ impl<'a> ChiselEmitter<'a> {
                 }
             }
             Expr::TryTake { queue } => {
+                // try_take is handled in match statement emission
                 if let Some(&edge_idx) = ctx.port_edges.get(queue) {
                     let edge = &self.net.network.graph[edge_idx];
                     let sname = sanitize(&edge.name);
-                    // Returns a tuple-like (valid, data) in the match context
-                    // The actual destructuring happens in the match arm handling
-                    format!("q_{sname}.io.deq")
+                    self.queue_deq_valid_signal(&sname, edge_idx)
                 } else {
                     format!("0.U /* unknown port {queue} */")
                 }
@@ -1133,25 +937,70 @@ impl<'a> ChiselEmitter<'a> {
                 format!("Cat({})", parts.join(", "))
             }
             Expr::Record { name, fields } => {
-                // Bundle construction: Wire(new Name) with field assignments
-                // For expression contexts, emit as a Bundle literal comment
-                let parts: Vec<String> = fields
-                    .iter()
-                    .map(|(fname, val)| {
-                        let v = self.emit_expr(&val.node, ctx);
-                        format!("{}: {v}", fname.node)
-                    })
-                    .collect();
-                format!("/* {name}{{{}}}) */", parts.join(", "))
+                // Records are packed bit vectors. Emit Cat(field_values) in
+                // declaration order (MSB first, same as SV struct packed).
+                if let Some(Ty::Record {
+                    fields: ty_fields, ..
+                }) = self.net.network.type_defs.get(name)
+                {
+                    // Build a map of field name -> expression
+                    let field_map: HashMap<&str, &Spanned<Expr>> = fields
+                        .iter()
+                        .map(|(fname, val)| (fname.node.as_str(), val))
+                        .collect();
+                    // Emit in declaration order (MSB first for Cat)
+                    let parts: Vec<String> = ty_fields
+                        .iter()
+                        .map(|(fname, _)| {
+                            if let Some(val) = field_map.get(fname.as_str()) {
+                                self.emit_expr(&val.node, ctx)
+                            } else {
+                                "0.U".to_string()
+                            }
+                        })
+                        .collect();
+                    format!("Cat({})", parts.join(", "))
+                } else {
+                    let parts: Vec<String> = fields
+                        .iter()
+                        .map(|(_, val)| self.emit_expr(&val.node, ctx))
+                        .collect();
+                    format!("Cat({})", parts.join(", "))
+                }
             }
             Expr::FieldAccess { expr, field } => {
+                // Field access on a packed bit vector: extract the right bits
+                let parent_ty = self.infer_expr_type(&expr.node, ctx);
                 let e = self.emit_expr(&expr.node, ctx);
-                format!("{e}.{}", field.node)
+                if let Ty::Record { fields, .. } = &parent_ty {
+                    // Calculate bit offset and width for the field
+                    // Fields are packed MSB-first (first field = highest bits)
+                    let total_w: u64 = fields.iter().map(|(_, t)| bit_width(t)).sum();
+                    let mut bit_pos = total_w;
+                    for (fname, fty) in fields {
+                        let fw = bit_width(fty);
+                        bit_pos -= fw;
+                        if fname == &field.node {
+                            return if fw == 1 {
+                                format!("{e}({bit_pos})")
+                            } else {
+                                format!("{e}({}, {})", bit_pos + fw - 1, bit_pos)
+                            };
+                        }
+                    }
+                }
+                format!("{e} /* .{} unknown */", field.node)
             }
             Expr::Index { expr: e, index } => {
                 let base = self.emit_expr(&e.node, ctx);
                 let idx = self.emit_expr(&index.node, ctx);
-                format!("{base}({idx})")
+                let base_ty = self.infer_expr_type(&e.node, ctx);
+                if let Ty::Array { elem, .. } = &base_ty {
+                    let elem_w = bit_width(elem);
+                    format!("{base}({idx} * {elem_w}.U + {elem_w}.U - 1.U, {idx} * {elem_w}.U)")
+                } else {
+                    format!("{base}({idx})")
+                }
             }
             Expr::Call { func, args } => {
                 let arg_strs: Vec<String> =
@@ -1245,13 +1094,13 @@ impl<'a> ChiselEmitter<'a> {
                     .collect();
                 Ty::Tuple(tys)
             }
-            Expr::Record { name, .. } => {
-                if let Some(ty) = self.net.network.type_defs.get(name) {
-                    ty.clone()
-                } else {
-                    Ty::Error
-                }
-            }
+            Expr::Record { name, .. } => self
+                .net
+                .network
+                .type_defs
+                .get(name)
+                .cloned()
+                .unwrap_or(Ty::Error),
             Expr::FieldAccess { expr: e, field } => {
                 let parent_ty = self.infer_expr_type(&e.node, ctx);
                 if let Ty::Record { fields, .. } = &parent_ty {
@@ -1305,10 +1154,60 @@ impl<'a> ChiselEmitter<'a> {
     }
 
     // -----------------------------------------------------------------------
+    // Queue signal helpers — abstract over internal vs external (IO port)
+    // -----------------------------------------------------------------------
+
+    fn queue_deq_valid(&self, sname: &str, edge_idx: EdgeIndex) -> String {
+        self.queue_deq_valid_signal(sname, edge_idx)
+    }
+
+    fn queue_deq_valid_signal(&self, sname: &str, edge_idx: EdgeIndex) -> String {
+        if self.memory_edges.contains_key(&edge_idx) {
+            format!("io.q_{sname}.valid")
+        } else {
+            format!("q_{sname}.io.deq.valid")
+        }
+    }
+
+    fn queue_deq_bits_signal(&self, sname: &str, edge_idx: EdgeIndex) -> String {
+        if self.memory_edges.contains_key(&edge_idx) {
+            format!("io.q_{sname}.bits")
+        } else {
+            format!("q_{sname}.io.deq.bits")
+        }
+    }
+
+    fn queue_deq_ready_signal(&self, sname: &str, edge_idx: EdgeIndex) -> String {
+        if self.memory_edges.contains_key(&edge_idx) {
+            format!("io.q_{sname}.ready")
+        } else {
+            format!("q_{sname}.io.deq.ready")
+        }
+    }
+
+    fn queue_enq_ready(&self, sname: &str, edge_idx: EdgeIndex) -> String {
+        if self.memory_edges.contains_key(&edge_idx) {
+            format!("io.q_{sname}.ready")
+        } else {
+            format!("q_{sname}.io.enq.ready")
+        }
+    }
+
+    fn queue_enq_signals(&self, sname: &str, edge_idx: EdgeIndex) -> (String, String) {
+        if self.memory_edges.contains_key(&edge_idx) {
+            (format!("io.q_{sname}.valid"), format!("io.q_{sname}.bits"))
+        } else {
+            (
+                format!("q_{sname}.io.enq.valid"),
+                format!("q_{sname}.io.enq.bits"),
+            )
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
 
-    /// Map a Ty to a Chisel type string.
     fn chisel_type(&self, ty: &Ty) -> String {
         match ty {
             Ty::Bits(n) => format!("UInt({n}.W)"),
@@ -1368,17 +1267,6 @@ fn unaryop_chisel(op: &UnaryOp) -> &'static str {
     }
 }
 
-/// Collect put targets from a statement body (only top-level puts).
-fn collect_puts_from_body(body: &[Spanned<Stmt>]) -> HashMap<String, Expr> {
-    let mut puts = HashMap::new();
-    for stmt in body {
-        if let Stmt::Put { target, value } = &stmt.node {
-            puts.insert(target.node.clone(), value.node.clone());
-        }
-    }
-    puts
-}
-
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -1428,7 +1316,11 @@ pipe Top {
         assert!(scala.contains("c_Counter_count"), "cell signal name");
         assert!(scala.contains("r_Counter_tick_can_fire"), "can_fire");
         assert!(scala.contains("r_Counter_tick_will_fire"), "will_fire");
-        assert!(scala.contains("Mux("), "Mux for cell writeback");
+        assert!(
+            scala.contains("when (r_Counter_tick_will_fire)"),
+            "when block"
+        );
+        assert!(scala.contains("c_Counter_count :="), "cell assignment");
         assert!(scala.contains("import chisel3._"), "chisel3 import");
     }
 
@@ -1461,8 +1353,8 @@ pipe Top {
 
         assert!(scala.contains("new Queue(UInt(32.W), 4)"), "Queue instance");
         assert!(scala.contains(".io.deq.valid"), "deq valid");
-        assert!(scala.contains(".io.enq.valid"), "enq valid");
-        assert!(scala.contains(".io.enq.bits"), "enq bits");
+        assert!(scala.contains(".io.enq.valid := true.B"), "enq valid");
+        assert!(scala.contains(".io.enq.bits := 42.U"), "enq bits");
     }
 
     #[test]
@@ -1525,7 +1417,15 @@ pipe Top {
             scala.contains("r_Counter_dec_can_fire && !r_Counter_inc_will_fire"),
             "priority suppression"
         );
-        assert!(scala.contains("MuxCase"), "MuxCase for multi-writer cell");
+        // Both rules write the cell inside when blocks — last connect wins
+        assert!(
+            scala.contains("when (r_Counter_inc_will_fire)"),
+            "inc when block"
+        );
+        assert!(
+            scala.contains("when (r_Counter_dec_will_fire)"),
+            "dec when block"
+        );
     }
 
     #[test]
@@ -1580,10 +1480,116 @@ pipe Top {
         assert_eq!(files.len(), 1);
         let scala = &files[0].content;
 
-        assert!(scala.contains("Mux("), "conditional routing uses Mux");
+        assert!(scala.contains("when ("), "conditional routing uses when");
         assert!(
             scala.contains("new Queue(UInt(32.W), 2)"),
             "Queue instances"
         );
+    }
+
+    #[test]
+    fn record_construction_emits_cat() {
+        let src = r#"
+record Cmd { op : Bits 8, addr : Bits 32 }
+
+process Sender {
+    produces: out : Queue(Cmd)
+    rule go {
+        out.put(Cmd { op = 1, addr = 42 })
+    }
+}
+
+process Receiver {
+    consumes: inp : Queue(Cmd)
+    rule go {
+        let c = inp.take()
+    }
+}
+
+pipe Top {
+    let q = Queue(Cmd, depth = 2)
+    Sender { out = q }
+    Receiver { inp = q }
+}
+"#;
+        let files = crate::build_chisel(src, "test.tbn").unwrap();
+        let scala = &files[0].content;
+
+        assert!(
+            scala.contains("Cat(1.U, 42.U)"),
+            "record construction uses Cat"
+        );
+        assert!(scala.contains("class Cmd extends Bundle"), "Bundle class");
+    }
+
+    #[test]
+    fn field_access_emits_bit_slice() {
+        let src = r#"
+record Cmd { op : Bits 8, addr : Bits 32 }
+
+process Reader {
+    consumes: inp : Queue(Cmd)
+    state: last_op : Cell(Bits 8, init = 0)
+    rule go {
+        let c = inp.take()
+        let _ = last_op.take()
+        last_op.put(c.op)
+    }
+}
+
+process Writer {
+    produces: out : Queue(Cmd)
+    rule go {
+        out.put(Cmd { op = 1, addr = 0 })
+    }
+}
+
+pipe Top {
+    let q = Queue(Cmd, depth = 2)
+    Writer { out = q }
+    Reader { inp = q }
+}
+"#;
+        let files = crate::build_chisel(src, "test.tbn").unwrap();
+        let scala = &files[0].content;
+
+        // op field is bits [39:32] (MSB in a 40-bit packed record)
+        assert!(scala.contains("(39, 32)"), "field access bit slice for op");
+    }
+
+    #[test]
+    fn spi_v2_compiles() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let tbn_path = manifest_dir.join("examples/spi2tlul_v2.tbn");
+        let src = std::fs::read_to_string(&tbn_path).unwrap();
+
+        let files = crate::build_chisel(&src, "spi2tlul_v2.tbn").unwrap();
+        assert_eq!(files.len(), 1);
+        let scala = &files[0].content;
+
+        // Record types
+        assert!(scala.contains("class DmaDesc extends Bundle"), "DmaDesc");
+        assert!(scala.contains("class TlA extends Bundle"), "TlA");
+        assert!(scala.contains("class TlD extends Bundle"), "TlD");
+
+        // External queues
+        assert!(scala.contains("Decoupled("), "Decoupled IO");
+        assert!(scala.contains("Flipped(Decoupled("), "Flipped IO");
+
+        // AsyncQueues
+        assert!(scala.contains("TbnAsyncFifo"), "AsyncQueue BlackBox");
+
+        // Constants
+        assert!(scala.contains("val TL_GET = 4.U"), "TL_GET constant");
+
+        // when blocks
+        assert!(scala.contains("when ("), "when blocks for rules");
+
+        // Record construction (Cat)
+        assert!(scala.contains("Cat("), "record construction uses Cat");
+
+        // No SV constructs
+        assert!(!scala.contains("always_ff"), "no SV");
+        assert!(!scala.contains("always_comb"), "no SV");
     }
 }

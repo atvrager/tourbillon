@@ -139,8 +139,8 @@ pipe Top { Counter {} }
 }
 
 #[test]
-fn chisel_cell_single_assignment() {
-    // Each cell should have exactly one := assignment (Mux or MuxCase)
+fn chisel_cell_assignment_in_when() {
+    // Cell assignments happen inside when(will_fire) blocks
     let src = r#"
 process Counter {
     state: count : Cell(Bits 32, init = 0)
@@ -153,23 +153,24 @@ pipe Top { Counter {} }
 "#;
     let files = tbn::build_chisel(src, "test.tbn").unwrap();
     let scala = &files[0].content;
+    // Cell has a default self-assignment + assignment in when block
     let assigns: Vec<&str> = scala
         .lines()
         .filter(|l| l.contains("c_Counter_count :="))
         .collect();
-    assert_eq!(
-        assigns.len(),
-        1,
-        "cell should have exactly one := assignment"
+    assert!(
+        assigns.len() >= 2,
+        "cell should have default + rule assignment"
     );
     assert!(
-        assigns[0].contains("Mux("),
-        "cell assignment should use Mux"
+        scala.contains("when (r_Counter_tick_will_fire)"),
+        "assignment in when block"
     );
 }
 
 #[test]
-fn chisel_multi_rule_uses_muxcase() {
+fn chisel_multi_rule_when_blocks() {
+    // Each conflicting rule gets its own when block (last connect semantics)
     let src = r#"
 process Counter {
     state: count : Cell(Bits 32, init = 0)
@@ -187,10 +188,16 @@ pipe Top { Counter {} }
     let files = tbn::build_chisel(src, "test.tbn").unwrap();
     let scala = &files[0].content;
     assert!(
-        scala.contains("MuxCase"),
-        "multi-rule cell should use MuxCase"
+        scala.contains("when (r_Counter_inc_will_fire)"),
+        "inc when block"
     );
-    // Each rule should have a unique next-value name
-    assert!(scala.contains("c_Counter_count_inc_next"), "inc next value");
-    assert!(scala.contains("c_Counter_count_dec_next"), "dec next value");
+    assert!(
+        scala.contains("when (r_Counter_dec_will_fire)"),
+        "dec when block"
+    );
+    // Priority: dec_will_fire is suppressed by inc
+    assert!(
+        scala.contains("r_Counter_dec_can_fire && !r_Counter_inc_will_fire"),
+        "priority suppression"
+    );
 }

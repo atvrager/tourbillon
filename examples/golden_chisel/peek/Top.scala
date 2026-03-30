@@ -14,10 +14,14 @@ class Top extends Module {
   val r_Reader_go_can_fire = true.B
   val r_Reader_go_will_fire = r_Reader_go_can_fire
 
-  // Rule: Writer.go
-  val c_Writer_reg_go_next = (c_Writer_reg + 1.U)
-  // Rule: Reader.go
+  c_Writer_reg := c_Writer_reg
 
-  c_Writer_reg := Mux(r_Writer_go_will_fire, c_Writer_reg_go_next, c_Writer_reg)
+  // Rule: Writer.go
+  when (r_Writer_go_will_fire) {
+    c_Writer_reg := (c_Writer_reg + 1.U)
+  }
+  // Rule: Reader.go
+  when (r_Reader_go_will_fire) {
+  }
 
 }

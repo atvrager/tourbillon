@@ -13,11 +13,15 @@ class Top extends Module {
   val r_Counter_dec_can_fire = true.B
   val r_Counter_dec_will_fire = r_Counter_dec_can_fire && !r_Counter_inc_will_fire
 
-  // Rule: Counter.inc
-  val c_Counter_count_inc_next = (c_Counter_count + 1.U)
-  // Rule: Counter.dec
-  val c_Counter_count_dec_next = (c_Counter_count - 1.U)
+  c_Counter_count := c_Counter_count
 
-  c_Counter_count := MuxCase(c_Counter_count, Seq(r_Counter_inc_will_fire -> c_Counter_count_inc_next, r_Counter_dec_will_fire -> c_Counter_count_dec_next))
+  // Rule: Counter.inc
+  when (r_Counter_inc_will_fire) {
+    c_Counter_count := (c_Counter_count + 1.U)
+  }
+  // Rule: Counter.dec
+  when (r_Counter_dec_will_fire) {
+    c_Counter_count := (c_Counter_count - 1.U)
+  }
 
 }

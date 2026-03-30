@@ -11,9 +11,11 @@ class Top extends Module {
   val r_Counter_tick_can_fire = true.B
   val r_Counter_tick_will_fire = r_Counter_tick_can_fire
 
-  // Rule: Counter.tick
-  val c_Counter_count_tick_next = (c_Counter_count + 1.U)
+  c_Counter_count := c_Counter_count
 
-  c_Counter_count := Mux(r_Counter_tick_will_fire, c_Counter_count_tick_next, c_Counter_count)
+  // Rule: Counter.tick
+  when (r_Counter_tick_will_fire) {
+    c_Counter_count := (c_Counter_count + 1.U)
+  }
 
 }
