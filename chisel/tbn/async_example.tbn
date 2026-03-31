@@ -1,0 +1,43 @@
+type AsyncCommand  = Bits 32
+type AsyncResponse = Bits 32
+
+process Async_FastProducer {
+    state: seq : Cell(Bits 32, init = 0)
+    produces: out : Queue(AsyncCommand)
+    rule go {
+        let s = seq.take()
+        out.put(s)
+        seq.put(s + 1)
+    }
+}
+
+process Async_SlowConsumer {
+    consumes: inp : Queue(AsyncCommand)
+    produces: out : Queue(AsyncResponse)
+    rule go {
+        let cmd = inp.take()
+        out.put(cmd + 100)
+    }
+}
+
+process Async_FastReceiver {
+    consumes: inp : Queue(AsyncResponse)
+    state: last : Cell(Bits 32, init = 0)
+    rule go {
+        let r = inp.take()
+        let _ = last.take()
+        last.put(r)
+    }
+}
+
+pipe AsyncCDC {
+    domain fast : Clock
+    domain slow : Clock
+
+    let cmd  = AsyncQueue(AsyncCommand, depth = 4)
+    let resp = AsyncQueue(AsyncResponse, depth = 4)
+
+    Async_FastProducer [fast] { out = cmd }
+    Async_SlowConsumer [slow] { inp = cmd, out = resp }
+    Async_FastReceiver [fast] { inp = resp }
+}

@@ -201,7 +201,7 @@ endmodule
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     name.replace('.', "_")
 }
 
@@ -301,7 +301,7 @@ fn unaryop_sv(op: &UnaryOp) -> &'static str {
 
 /// Collect port names that are unconditionally `put()` in a rule.
 /// Only top-level puts count — puts inside if/match branches are conditional.
-fn collect_unconditional_puts(rule: &Rule) -> BTreeSet<String> {
+pub(crate) fn collect_unconditional_puts(rule: &Rule) -> BTreeSet<String> {
     let mut puts = BTreeSet::new();
     for stmt in &rule.body {
         if let Stmt::Put { target, .. } = &stmt.node {
@@ -313,7 +313,7 @@ fn collect_unconditional_puts(rule: &Rule) -> BTreeSet<String> {
 }
 
 /// Collect port names that use blocking `take()` (not `try_take()`) in a rule.
-fn collect_blocking_takes(rule: &Rule) -> BTreeSet<String> {
+pub(crate) fn collect_blocking_takes(rule: &Rule) -> BTreeSet<String> {
     let mut takes = BTreeSet::new();
     for stmt in &rule.body {
         collect_takes_in_stmt(&stmt.node, &mut takes);
@@ -322,7 +322,7 @@ fn collect_blocking_takes(rule: &Rule) -> BTreeSet<String> {
 }
 
 /// Collect port names that use `try_take()` in a rule.
-fn collect_try_takes(rule: &Rule) -> BTreeSet<String> {
+pub(crate) fn collect_try_takes(rule: &Rule) -> BTreeSet<String> {
     let mut try_takes = BTreeSet::new();
     for stmt in &rule.body {
         collect_try_takes_in_stmt(&stmt.node, &mut try_takes);
@@ -482,7 +482,7 @@ fn collect_takes_in_expr(expr: &Expr, takes: &mut BTreeSet<String>) {
 
 /// Lower scheduled networks to SystemVerilog files.
 /// Returns true for Queue and AsyncQueue edge kinds (not Cell).
-fn is_queue_like(kind: &QueueEdgeKind) -> bool {
+pub(crate) fn is_queue_like(kind: &QueueEdgeKind) -> bool {
     matches!(
         kind,
         QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue
@@ -741,6 +741,7 @@ impl<'a> SvEmitter<'a> {
         self.emit_dpi_imports();
         self.emit_type_declarations();
         self.emit_queue_instances();
+        self.emit_memory_port_aliases();
         self.emit_cell_declarations();
         self.emit_rule_enables();
         self.emit_rule_logic();
@@ -888,6 +889,48 @@ impl<'a> SvEmitter<'a> {
         ports
     }
 
+    /// Emit typed local aliases for external queue (memory-port) data signals
+    /// that carry structured types (Record / Enum). Module ports must be flat
+    /// `logic [N:0]`, but the combinational logic emits `.field` access, so we
+    /// create a locally-typed signal and assign the port into it.
+    fn emit_memory_port_aliases(&mut self) {
+        let mut sorted: Vec<(EdgeIndex, bool)> =
+            self.memory_edges.iter().map(|(&k, &v)| (k, v)).collect();
+        sorted.sort_by_key(|(idx, _)| idx.index());
+
+        let mut any = false;
+        for (edge_idx, cpu_is_writer) in &sorted {
+            let edge = &self.net.network.graph[*edge_idx];
+            let is_structured = matches!(edge.elem_ty, Ty::Record { .. } | Ty::Enum { .. });
+            if !is_structured {
+                continue;
+            }
+
+            let sname = sanitize(&edge.name);
+            let td = sv_type_decl(&edge.elem_ty);
+
+            if !any {
+                self.line("// Typed aliases for external queue ports with structured types");
+                any = true;
+            }
+
+            if *cpu_is_writer {
+                // Output ports: comb logic assigns struct literals into flat logic.
+                // Verilator handles this fine — no alias needed.
+            } else {
+                // CPU reads → deq_data is an input port (flat wire).
+                // Create a typed local signal and assign from the flat port.
+                self.line(&format!("{td}q_{sname}_deq_data_typed;"));
+                self.line(&format!(
+                    "assign q_{sname}_deq_data_typed = q_{sname}_deq_data;"
+                ));
+            }
+        }
+        if any {
+            self.blank();
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Queue FIFO declarations and instances
     // -----------------------------------------------------------------------
@@ -957,16 +1000,17 @@ impl<'a> SvEmitter<'a> {
             self.blank();
 
             if matches!(edge.kind, QueueEdgeKind::AsyncQueue) {
-                // Async FIFO: look up writer/reader domains for clock wiring
+                // Async FIFO: clocks from source/dest domains, but BOTH resets
+                // use the system reset (rst_n) to avoid pointer desync when one
+                // domain resets independently (e.g. CSB-based SPI reset).
                 let (src_node, dst_node) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
                 let wr_clk =
                     self.clock_for_instance(&self.net.network.graph[src_node].instance_name);
-                let wr_rst =
-                    self.reset_for_instance(&self.net.network.graph[src_node].instance_name);
                 let rd_clk =
                     self.clock_for_instance(&self.net.network.graph[dst_node].instance_name);
-                let rd_rst =
-                    self.reset_for_instance(&self.net.network.graph[dst_node].instance_name);
+                // Use system reset for both sides to keep pointers synchronized
+                let wr_rst = "rst_n".to_string();
+                let rd_rst = "rst_n".to_string();
 
                 self.line(&format!(
                     "tbn_async_fifo #(.WIDTH({w}), .DEPTH({})) aq_{sname}_inst (",
@@ -1527,7 +1571,15 @@ impl<'a> SvEmitter<'a> {
                     match &edge.kind {
                         QueueEdgeKind::Cell { .. } => format!("c_{sname}_q"),
                         QueueEdgeKind::Queue { .. } | QueueEdgeKind::AsyncQueue => {
-                            format!("q_{sname}_deq_data")
+                            // Use typed alias for external queue ports with structured types
+                            let suffix = if self.memory_edges.contains_key(&edge_idx)
+                                && matches!(edge.elem_ty, Ty::Record { .. } | Ty::Enum { .. })
+                            {
+                                "_typed"
+                            } else {
+                                ""
+                            };
+                            format!("q_{sname}_deq_data{suffix}")
                         }
                     }
                 } else {
@@ -1547,7 +1599,15 @@ impl<'a> SvEmitter<'a> {
                 if let Some(&edge_idx) = ctx.port_edges.get(queue) {
                     let edge = &self.net.network.graph[edge_idx];
                     let sname = sanitize(&edge.name);
-                    format!("{{q_{sname}_deq_valid, q_{sname}_deq_data}}")
+                    // Use typed alias for external queue ports with structured types
+                    let suffix = if self.memory_edges.contains_key(&edge_idx)
+                        && matches!(edge.elem_ty, Ty::Record { .. } | Ty::Enum { .. })
+                    {
+                        "_typed"
+                    } else {
+                        ""
+                    };
+                    format!("{{q_{sname}_deq_valid, q_{sname}_deq_data{suffix}}}")
                 } else {
                     format!("/* unknown port {queue} */ '0")
                 }

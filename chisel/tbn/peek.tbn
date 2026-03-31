@@ -1,0 +1,19 @@
+process Peek_Writer {
+    state: reg : Cell(Bits 32, init = 0)
+    rule go {
+        let v = reg.take()
+        reg.put(v + 1)
+    }
+}
+
+process Peek_Reader {
+    peeks: reg : Cell(Bits 32)
+    rule go {
+        let v = reg.peek()
+    }
+}
+
+pipe PeekTest {
+    Peek_Writer {}
+    Peek_Reader { reg = Peek_Writer.reg }
+}

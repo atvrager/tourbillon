@@ -1,0 +1,25 @@
+process PC_Producer {
+    produces: out : Queue(Bits 32)
+    state: seq : Cell(Bits 32, init = 0)
+    rule go {
+        let s = seq.take()
+        out.put(s)
+        seq.put(s + 1)
+    }
+}
+
+process PC_Consumer {
+    consumes: input : Queue(Bits 32)
+    state: last : Cell(Bits 32, init = 0)
+    rule go {
+        let x = input.take()
+        let _ = last.take()
+        last.put(x)
+    }
+}
+
+pipe ProducerConsumer {
+    let q = Queue(Bits 32, depth = 4)
+    PC_Producer { out = q }
+    PC_Consumer { input = q }
+}
