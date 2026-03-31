@@ -24,8 +24,12 @@ class TbnAsyncFifo(width: Int, depth: Int) extends Module {
     val rd_rst  = Input(Reset())
   })
 
-  // Storage (combinational read, written in wr domain)
-  val storage = Reg(Vec(depth, UInt(width.W)))
+  // Storage: registered in the writer's clock domain (wr_clk).
+  // Reads are combinational (just indexing into the Vec).
+  // Zero-init for deterministic simulation.
+  val storage = withClockAndReset(io.wr_clk, io.wr_rst) {
+    RegInit(VecInit(Seq.fill(depth)(0.U(width.W))))
+  }
 
   // --- Write-side (wr_clk domain) ---
   val wrPtrBin = withClockAndReset(io.wr_clk, io.wr_rst) { RegInit(0.U((awidth + 1).W)) }
