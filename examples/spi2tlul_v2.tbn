@@ -357,11 +357,23 @@ process SpiFrameParser {
 --   4 = WRITE_SEND — issue TL PutFullData
 --   5 = WRITE_WAIT — wait for TL-D ack
 
+-- TlaSender: drains pending TL-A requests into the external TL-A queue.
+-- The unconditional put ensures can_fire includes tl_a.enq_ready,
+-- providing proper back-pressure to the DmaEngine via the pending queue.
+process TlaSender {
+    consumes: pending : Queue(TlA)
+    produces: tl_a    : Queue(TlA)
+    rule send {
+        let req = pending.take()
+        tl_a.put(req)
+    }
+}
+
 process DmaEngine {
     consumes: desc      : Queue(DmaDesc)
     consumes: wr_data   : Queue(Bits 8)
     produces: rd_data   : Queue(Bits 128)
-    produces: tl_a      : Queue(TlA)
+    produces: tl_a_pending : Queue(TlA)
     consumes: tl_d      : Queue(TlD)
     state:    phase     : Cell(Bits 4, init = 0)
     state:    dma_addr  : Cell(Bits 32, init = 0)
@@ -409,7 +421,7 @@ process DmaEngine {
         } else {
             if ph == 1 {
                 -- READ_SEND: issue TL Get
-                tl_a.put(TlA {
+                tl_a_pending.put(TlA {
                     opcode  = TL_GET,
                     param   = 0,
                     size    = TL_SIZE,
@@ -489,7 +501,7 @@ process DmaEngine {
                     } else {
                         if ph == 4 {
                             -- WRITE_SEND: issue TL PutFullData
-                            tl_a.put(TlA {
+                            tl_a_pending.put(TlA {
                                 opcode  = TL_PUT_FULL,
                                 param   = 0,
                                 size    = TL_SIZE,
@@ -549,12 +561,8 @@ pipe Spi2TLULV2 {
     let miso_pin = external Queue(Bits 1, depth = 1)
 
     -- TileLink channels (external)
-    -- tl_a depth=2: DmaEngine has at most 1 outstanding request (waits for
-    -- D-response before next A-request), so depth 2 ensures the conditional
-    -- put in phases 1/4 always has room. Depth 1 would require the external
-    -- consumer to be ready on the exact cycle the put fires.
-    let tl_a = external Queue(TlA, depth = 2)
-    let tl_d = external Queue(TlD, depth = 2)
+    let tl_a = external Queue(TlA, depth = 1)
+    let tl_d = external Queue(TlD, depth = 1)
 
     -- CDC: SPI → system (DMA descriptor)
     let desc_cdc = AsyncQueue(DmaDesc, depth = 2)
@@ -577,12 +585,18 @@ pipe Spi2TLULV2 {
     SpiBulkDeserializer [spi] { bulk_word = rd_data_cdc, bulk_byte = miso_byte_q }
     SpiMisoShifter [spi] { miso_byte = miso_byte_q, miso_pin = miso_pin }
 
+    -- TL-A back-pressure: DmaEngine puts into a staging queue,
+    -- TlaSender drains it with an unconditional put (can_fire
+    -- includes tl_a.enq_ready).
+    let tl_a_pending = Queue(TlA, depth = 1)
+
     -- System domain instances
     DmaEngine {
         desc    = desc_cdc,
         wr_data = wr_data_cdc,
         rd_data = rd_data_cdc,
-        tl_a    = tl_a,
+        tl_a_pending = tl_a_pending,
         tl_d    = tl_d
     }
+    TlaSender { pending = tl_a_pending, tl_a = tl_a }
 }
