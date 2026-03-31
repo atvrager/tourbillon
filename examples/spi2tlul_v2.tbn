@@ -549,8 +549,12 @@ pipe Spi2TLULV2 {
     let miso_pin = external Queue(Bits 1, depth = 1)
 
     -- TileLink channels (external)
-    let tl_a = external Queue(TlA, depth = 1)
-    let tl_d = external Queue(TlD, depth = 1)
+    -- tl_a depth=2: DmaEngine has at most 1 outstanding request (waits for
+    -- D-response before next A-request), so depth 2 ensures the conditional
+    -- put in phases 1/4 always has room. Depth 1 would require the external
+    -- consumer to be ready on the exact cycle the put fires.
+    let tl_a = external Queue(TlA, depth = 2)
+    let tl_d = external Queue(TlD, depth = 2)
 
     -- CDC: SPI → system (DMA descriptor)
     let desc_cdc = AsyncQueue(DmaDesc, depth = 2)
@@ -561,7 +565,7 @@ pipe Spi2TLULV2 {
 
     -- Internal SPI-domain queues
     let spi_byte_q  = Queue(Bits 8, depth = 2)
-    let miso_byte_q = Queue(Bits 8, depth = 2)
+    let miso_byte_q = Queue(Bits 8, depth = 16)
 
     -- SPI domain instances
     SpiByteAssembler [spi] { mosi_pin = mosi_pin, spi_byte = spi_byte_q }

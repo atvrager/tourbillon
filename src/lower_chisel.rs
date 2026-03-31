@@ -376,16 +376,17 @@ impl<'a> ChiselEmitter<'a> {
             let w = bit_width(&edge.elem_ty);
 
             if matches!(edge.kind, QueueEdgeKind::AsyncQueue) {
-                // AsyncQueue: writer and reader are in different clock domains
+                // AsyncQueue: clocks from source/dest domains, but BOTH resets
+                // use system reset to avoid pointer desync on independent resets.
                 let (src_node, dst_node) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
                 let wr_clk =
                     self.clock_for_instance(&self.net.network.graph[src_node].instance_name);
-                let wr_rst =
-                    self.reset_for_instance(&self.net.network.graph[src_node].instance_name);
                 let rd_clk =
                     self.clock_for_instance(&self.net.network.graph[dst_node].instance_name);
-                let rd_rst =
-                    self.reset_for_instance(&self.net.network.graph[dst_node].instance_name);
+                // System reset for both sides — prevents pointer desync when
+                // one domain resets independently (e.g. CSB-based SPI reset).
+                let wr_rst = "reset".to_string();
+                let rd_rst = "reset".to_string();
 
                 self.line(&format!("// AsyncQueue: {}", edge.name));
                 self.line(&format!(

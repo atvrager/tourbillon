@@ -1000,16 +1000,17 @@ impl<'a> SvEmitter<'a> {
             self.blank();
 
             if matches!(edge.kind, QueueEdgeKind::AsyncQueue) {
-                // Async FIFO: look up writer/reader domains for clock wiring
+                // Async FIFO: clocks from source/dest domains, but BOTH resets
+                // use the system reset (rst_n) to avoid pointer desync when one
+                // domain resets independently (e.g. CSB-based SPI reset).
                 let (src_node, dst_node) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
                 let wr_clk =
                     self.clock_for_instance(&self.net.network.graph[src_node].instance_name);
-                let wr_rst =
-                    self.reset_for_instance(&self.net.network.graph[src_node].instance_name);
                 let rd_clk =
                     self.clock_for_instance(&self.net.network.graph[dst_node].instance_name);
-                let rd_rst =
-                    self.reset_for_instance(&self.net.network.graph[dst_node].instance_name);
+                // Use system reset for both sides to keep pointers synchronized
+                let wr_rst = "rst_n".to_string();
+                let rd_rst = "rst_n".to_string();
 
                 self.line(&format!(
                     "tbn_async_fifo #(.WIDTH({w}), .DEPTH({})) aq_{sname}_inst (",

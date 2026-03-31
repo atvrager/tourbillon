@@ -393,13 +393,15 @@ pipe Top {
         sv.contains(".rd_clk(slow_clk)"),
         "missing rd_clk wiring: {sv}"
     );
+    // Both sides use system reset (rst_n) to prevent pointer desync
+    // when domains reset independently.
     assert!(
-        sv.contains(".wr_rst_n(fast_rst_n)"),
-        "missing wr_rst_n wiring: {sv}"
+        sv.contains(".wr_rst_n(rst_n)"),
+        "wr_rst_n should use system reset: {sv}"
     );
     assert!(
-        sv.contains(".rd_rst_n(slow_rst_n)"),
-        "missing rd_rst_n wiring: {sv}"
+        sv.contains(".rd_rst_n(rst_n)"),
+        "rd_rst_n should use system reset: {sv}"
     );
 }
 

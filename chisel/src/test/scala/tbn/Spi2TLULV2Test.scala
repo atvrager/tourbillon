@@ -144,11 +144,19 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
     def reset(): Unit = {
       dut.reset.poke(true.B)
       dut.io.spi_clk_in.poke(false.B)
-      dut.io.spi_csb.poke(true.B)  // CSB high = inactive = SPI domain in reset
+      dut.io.spi_csb.poke(true.B)  // CSB high = inactive
       dut.io.spi_mosi_valid.poke(false.B)
       dut.io.spi_mosi_data.poke(false.B)
       dut.io.tl_a_first_reset.poke(false.B)
-      dut.clock.step(5)
+      // Toggle SPI clock during reset so that SPI-domain RegInit values
+      // (in async FIFOs and cells) actually take effect. System reset is
+      // now used for both sides of the CDC FIFOs.
+      for (_ <- 0 until 5) {
+        dut.io.spi_clk_in.poke(true.B)
+        dut.clock.step(1)
+        dut.io.spi_clk_in.poke(false.B)
+        dut.clock.step(1)
+      }
       dut.reset.poke(false.B)
       dut.clock.step(5)
     }
@@ -158,10 +166,15 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
       dut.io.spi_csb.poke(false.B)
     }
 
-    /** Deassert CSB to reset SPI domain. */
+    /** Deassert CSB. Keep toggling SPI clock so CDC sync chains can drain. */
     def csbDeassert(): Unit = {
       dut.io.spi_csb.poke(true.B)
-      dut.clock.step(30)
+      // Continue toggling both clocks so the async FIFOs can flush
+      for (_ <- 0 until 30) {
+        spiLevel = !spiLevel
+        dut.io.spi_clk_in.poke(spiLevel.B)
+        dut.clock.step(1)
+      }
     }
 
     var spiLevel: Boolean = false
