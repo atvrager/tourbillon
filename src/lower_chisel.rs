@@ -261,13 +261,24 @@ impl<'a> ChiselEmitter<'a> {
     // -----------------------------------------------------------------------
 
     fn emit_io_bundle(&mut self) {
-        let mem_ports = self.collect_io_ports();
-        if mem_ports.is_empty() {
+        let mut ports = vec![];
+
+        // Domain clock/reset ports (additional domains beyond the implicit clock/reset)
+        let domains = &self.net.network.domains;
+        for domain in domains {
+            ports.push(format!("val {domain}_clk = Input(Clock())"));
+            ports.push(format!("val {domain}_rst_n = Input(Bool())"));
+        }
+
+        // External queue / memory ports
+        ports.extend(self.collect_io_ports());
+
+        if ports.is_empty() {
             self.line("val io = IO(new Bundle {})");
         } else {
             self.line("val io = IO(new Bundle {");
             self.indent();
-            for port in &mem_ports {
+            for port in &ports {
                 self.line(port);
             }
             self.dedent();
@@ -327,7 +338,19 @@ impl<'a> ChiselEmitter<'a> {
                 let sname = sanitize(&edge.name);
                 let w = bit_width(&edge.elem_ty);
                 let init_val = init.map_or("0".to_string(), |v| format!("{v}"));
-                self.line(&format!("val c_{sname} = RegInit({init_val}.U({w}.W))"));
+
+                // Determine clock domain from the owning process node
+                let (src_node, _) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
+                let inst_name = &self.net.network.graph[src_node].instance_name;
+                if self.is_non_default_domain(inst_name) {
+                    let clk = self.clock_for_instance(inst_name);
+                    let rst = self.reset_for_instance(inst_name);
+                    self.line(&format!(
+                        "val c_{sname} = withClockAndReset({clk}, {rst}) {{ RegInit({init_val}.U({w}.W)) }}"
+                    ));
+                } else {
+                    self.line(&format!("val c_{sname} = RegInit({init_val}.U({w}.W))"));
+                }
                 any = true;
             }
         }
@@ -353,11 +376,26 @@ impl<'a> ChiselEmitter<'a> {
             let w = bit_width(&edge.elem_ty);
 
             if matches!(edge.kind, QueueEdgeKind::AsyncQueue) {
+                // AsyncQueue: writer and reader are in different clock domains
+                let (src_node, dst_node) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
+                let wr_clk =
+                    self.clock_for_instance(&self.net.network.graph[src_node].instance_name);
+                let wr_rst =
+                    self.reset_for_instance(&self.net.network.graph[src_node].instance_name);
+                let rd_clk =
+                    self.clock_for_instance(&self.net.network.graph[dst_node].instance_name);
+                let rd_rst =
+                    self.reset_for_instance(&self.net.network.graph[dst_node].instance_name);
+
                 self.line(&format!("// AsyncQueue: {}", edge.name));
                 self.line(&format!(
                     "val q_{sname} = Module(new TbnAsyncFifo({w}, {}))",
                     edge.depth
                 ));
+                self.line(&format!("q_{sname}.io.wr_clk := {wr_clk}"));
+                self.line(&format!("q_{sname}.io.wr_rst := {wr_rst}"));
+                self.line(&format!("q_{sname}.io.rd_clk := {rd_clk}"));
+                self.line(&format!("q_{sname}.io.rd_rst := {rd_rst}"));
             } else {
                 let init_count = match &edge.kind {
                     QueueEdgeKind::Queue { init_tokens, .. } if *init_tokens > 0 => {
@@ -369,10 +407,23 @@ impl<'a> ChiselEmitter<'a> {
                 if init_count.is_some() {
                     self.line("// TODO: init tokens not directly supported in Chisel Queue");
                 }
-                self.line(&format!(
-                    "val q_{sname} = Module(new Queue(UInt({w}.W), {}))",
-                    edge.depth
-                ));
+
+                // Sync queue: use the source node's clock domain
+                let (src_node, _) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
+                let inst_name = &self.net.network.graph[src_node].instance_name;
+                if self.is_non_default_domain(inst_name) {
+                    let clk = self.clock_for_instance(inst_name);
+                    let rst = self.reset_for_instance(inst_name);
+                    self.line(&format!(
+                        "val q_{sname} = withClockAndReset({clk}, {rst}) {{ Module(new Queue(UInt({w}.W), {})) }}",
+                        edge.depth
+                    ));
+                } else {
+                    self.line(&format!(
+                        "val q_{sname} = Module(new Queue(UInt({w}.W), {}))",
+                        edge.depth
+                    ));
+                }
             }
             self.blank();
         }
@@ -1232,6 +1283,37 @@ impl<'a> ChiselEmitter<'a> {
                 format!("q_{sname}.io.enq.bits"),
             )
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Clock domain helpers
+    // -----------------------------------------------------------------------
+
+    /// Clock expression for an instance. Default domain uses `clock` (implicit).
+    fn clock_for_instance(&self, instance_name: &str) -> String {
+        if let Some(Some(domain)) = self.net.network.domain_map.get(instance_name) {
+            format!("io.{domain}_clk")
+        } else {
+            "clock".to_string()
+        }
+    }
+
+    /// Reset expression for an instance. Default domain uses `reset` (implicit).
+    /// Named domains use active-low `{domain}_rst_n`, converted to active-high.
+    fn reset_for_instance(&self, instance_name: &str) -> String {
+        if let Some(Some(domain)) = self.net.network.domain_map.get(instance_name) {
+            format!("(!io.{domain}_rst_n).asAsyncReset")
+        } else {
+            "reset".to_string()
+        }
+    }
+
+    /// True if this instance is NOT in the default clock domain.
+    fn is_non_default_domain(&self, instance_name: &str) -> bool {
+        matches!(
+            self.net.network.domain_map.get(instance_name),
+            Some(Some(_))
+        )
     }
 
     // -----------------------------------------------------------------------

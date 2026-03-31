@@ -4,61 +4,81 @@ import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 
+class MarieTestWrapper extends Module {
+  val io = IO(new Bundle {
+    val cpu_clk_in  = Input(Bool())
+    val xbar_clk_in = Input(Bool())
+    val dev_clk_in  = Input(Bool())
+  })
+
+  val dut = Module(new Marie)
+
+  // Domain clocks from Bool inputs
+  dut.io.cpu_clk   := io.cpu_clk_in.asClock
+  dut.io.cpu_rst_n := !reset.asBool
+  dut.io.xbar_clk  := io.xbar_clk_in.asClock
+  dut.io.xbar_rst_n := !reset.asBool
+  dut.io.dev_clk   := io.dev_clk_in.asClock
+  dut.io.dev_rst_n := !reset.asBool
+
+  // imem: NOP (addi x0, x0, 0 = 0x00000013)
+  dut.io.q_CPUCore_imem_read_req.ready  := true.B
+  dut.io.q_CPUCore_imem_read_resp.valid := true.B
+  dut.io.q_CPUCore_imem_read_resp.bits  := "h00000013".U
+  dut.io.q_CPUCore_imem_write_req.ready := true.B
+
+  // dmem
+  dut.io.q_dev_mem_read_req.ready  := true.B
+  dut.io.q_dev_mem_read_resp.valid := true.B
+  dut.io.q_dev_mem_read_resp.bits  := 0.U
+  dut.io.q_dev_mem_write_req.ready := true.B
+
+  // UART: idle
+  dut.io.q_UartPhy_tx_pin.ready  := true.B
+  dut.io.q_UartPhy_rx_pin.valid  := false.B
+  dut.io.q_UartPhy_rx_pin.bits   := 0.U
+  dut.io.q_UartPhy_rts_pin.ready := true.B
+  dut.io.q_UartPhy_cts_pin.valid := true.B
+  dut.io.q_UartPhy_cts_pin.bits  := 0.U
+}
+
 class MarieSpec extends AnyFreeSpec with ChiselSim {
-  "Marie SoC should elaborate and simulate" in {
-    simulate(new Marie) { dut =>
+  "Marie SoC should elaborate and simulate with 3 clock domains" in {
+    simulate(new MarieTestWrapper) { dut =>
       dut.reset.poke(true.B)
-      dut.clock.step(2)
-      dut.reset.poke(false.B)
-
-      // imem: instruction memory port — provide NOP (addi x0, x0, 0 = 0x00000013)
-      dut.io.q_CPUCore_imem_read_req.ready.poke(true.B)
-      dut.io.q_CPUCore_imem_read_resp.valid.poke(true.B)
-      dut.io.q_CPUCore_imem_read_resp.bits.poke("h00000013".U) // NOP
-      dut.io.q_CPUCore_imem_write_req.ready.poke(true.B)
-
-      // dmem: data memory port — always ready, return zero
-      dut.io.q_dev_mem_read_req.ready.poke(true.B)
-      dut.io.q_dev_mem_read_resp.valid.poke(true.B)
-      dut.io.q_dev_mem_read_resp.bits.poke(0.U)
-      dut.io.q_dev_mem_write_req.ready.poke(true.B)
-
-      // UART: idle
-      dut.io.q_UartPhy_tx_pin.ready.poke(true.B)
-      dut.io.q_UartPhy_rx_pin.valid.poke(false.B)
-      dut.io.q_UartPhy_rx_pin.bits.poke(0.U)
-      dut.io.q_UartPhy_rts_pin.ready.poke(true.B)
-      dut.io.q_UartPhy_cts_pin.valid.poke(true.B)
-      dut.io.q_UartPhy_cts_pin.bits.poke(0.U)
-
-      // Run the SoC for 100 cycles executing NOPs
-      dut.clock.step(100)
-    }
-  }
-
-  "Marie SoC should survive 500 cycles" in {
-    simulate(new Marie) { dut =>
-      dut.reset.poke(true.B)
+      dut.io.cpu_clk_in.poke(false.B)
+      dut.io.xbar_clk_in.poke(false.B)
+      dut.io.dev_clk_in.poke(false.B)
       dut.clock.step(5)
       dut.reset.poke(false.B)
 
-      // Provide NOP on imem, zero on dmem, idle UART
-      dut.io.q_CPUCore_imem_read_req.ready.poke(true.B)
-      dut.io.q_CPUCore_imem_read_resp.valid.poke(true.B)
-      dut.io.q_CPUCore_imem_read_resp.bits.poke("h00000013".U)
-      dut.io.q_CPUCore_imem_write_req.ready.poke(true.B)
-      dut.io.q_dev_mem_read_req.ready.poke(true.B)
-      dut.io.q_dev_mem_read_resp.valid.poke(true.B)
-      dut.io.q_dev_mem_read_resp.bits.poke(0.U)
-      dut.io.q_dev_mem_write_req.ready.poke(true.B)
-      dut.io.q_UartPhy_tx_pin.ready.poke(true.B)
-      dut.io.q_UartPhy_rx_pin.valid.poke(false.B)
-      dut.io.q_UartPhy_rx_pin.bits.poke(0.U)
-      dut.io.q_UartPhy_rts_pin.ready.poke(true.B)
-      dut.io.q_UartPhy_cts_pin.valid.poke(true.B)
-      dut.io.q_UartPhy_cts_pin.bits.poke(0.U)
+      // Run 200 cycles with all 3 domain clocks toggling at different rates
+      // cpu=every cycle, xbar=every 2, dev=every 3 (approximates 100/150/50 MHz)
+      var xbarCount = 0
+      var devCount = 0
+      var cpuLevel = false
+      var xbarLevel = false
+      var devLevel = false
+      for (_ <- 0 until 200) {
+        cpuLevel = !cpuLevel
+        dut.io.cpu_clk_in.poke(cpuLevel.B)
 
-      dut.clock.step(500)
+        xbarCount += 1
+        if (xbarCount >= 2) {
+          xbarLevel = !xbarLevel
+          dut.io.xbar_clk_in.poke(xbarLevel.B)
+          xbarCount = 0
+        }
+
+        devCount += 1
+        if (devCount >= 3) {
+          devLevel = !devLevel
+          dut.io.dev_clk_in.poke(devLevel.B)
+          devCount = 0
+        }
+
+        dut.clock.step(1)
+      }
     }
   }
 }

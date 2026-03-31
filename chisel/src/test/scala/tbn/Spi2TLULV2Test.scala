@@ -12,6 +12,8 @@ import org.scalatest.freespec.AnyFreeSpec
 
 class Spi2TLULV2TestWrapper extends Module {
   val io = IO(new Bundle {
+    val spi_clk_in     = Input(Bool())
+    val spi_csb        = Input(Bool())
     val spi_mosi_valid = Input(Bool())
     val spi_mosi_data  = Input(Bool())
     val spi_miso_valid = Output(Bool())
@@ -29,6 +31,10 @@ class Spi2TLULV2TestWrapper extends Module {
   })
 
   val dut = Module(new Spi2TLULV2)
+
+  // SPI domain clock/reset from test harness
+  dut.io.spi_clk   := io.spi_clk_in.asClock
+  dut.io.spi_rst_n := !io.spi_csb
 
   // MOSI: drive from test harness
   dut.io.q_mosi_pin.valid := io.spi_mosi_valid
@@ -137,6 +143,8 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
   class SpiDriver(dut: Spi2TLULV2TestWrapper) {
     def reset(): Unit = {
       dut.reset.poke(true.B)
+      dut.io.spi_clk_in.poke(false.B)
+      dut.io.spi_csb.poke(true.B)  // CSB high = inactive = SPI domain in reset
       dut.io.spi_mosi_valid.poke(false.B)
       dut.io.spi_mosi_data.poke(false.B)
       dut.io.tl_a_first_reset.poke(false.B)
@@ -145,20 +153,52 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
       dut.clock.step(5)
     }
 
+    /** Assert CSB (active low) to bring SPI domain out of reset. */
+    def csbAssert(): Unit = {
+      dut.io.spi_csb.poke(false.B)
+    }
+
+    /** Deassert CSB to reset SPI domain. */
+    def csbDeassert(): Unit = {
+      dut.io.spi_csb.poke(true.B)
+      dut.clock.step(30)
+    }
+
+    var spiLevel: Boolean = false
+
+    /** Toggle SPI clock once (rising edge), stepping sys clock to propagate. */
+    def spiPosedge(): Unit = {
+      spiLevel = true
+      dut.io.spi_clk_in.poke(true.B)
+      dut.clock.step(1)
+    }
+
+    def spiNegedge(): Unit = {
+      spiLevel = false
+      dut.io.spi_clk_in.poke(false.B)
+      dut.clock.step(1)
+    }
+
+    /** One full SPI clock cycle. */
+    def spiCycle(): Unit = {
+      spiPosedge()
+      spiNegedge()
+    }
+
     def spiXferByte(tx: Int): Unit = {
       for (bit <- 7 to 0 by -1) {
         dut.io.spi_mosi_valid.poke(true.B)
         dut.io.spi_mosi_data.poke((((tx >> bit) & 1) != 0).B)
-        dut.clock.step(1)
+        spiCycle()
       }
     }
 
     def spiRecvByte(): Int = {
       var rx = 0
       for (_ <- 7 to 0 by -1) {
-        dut.io.spi_mosi_valid.poke(true.B) // clock the SPI — MISO shifts on each bit
+        dut.io.spi_mosi_valid.poke(true.B)
         dut.io.spi_mosi_data.poke(false.B)
-        dut.clock.step(1)
+        spiCycle()
         rx = (rx << 1) | (if (dut.io.spi_miso_data.peek().litValue != 0) 1 else 0)
       }
       rx
@@ -184,7 +224,7 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
       for (i <- 0 until nbits) {
         dut.io.spi_mosi_valid.poke(true.B)
         dut.io.spi_mosi_data.poke(false.B)
-        dut.clock.step(1)
+        spiCycle()
         val byteIdx = i / 8
         val bitIdx = 7 - (i % 8)
         if (dut.io.spi_miso_data.peek().litValue != 0) {
@@ -245,13 +285,10 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
 
       val countBefore = dut.io.tl_a_cap_count.peek().litValue.toLong
 
-      // Send read frame: op=0x01, addr=0xCAFE0000, len=0
-      dut.io.spi_mosi_valid.poke(true.B)
+      spi.csbAssert()
       spi.spiSendHeader(0x01, 0xCAFE0000L, 0x0000)
-      // Clock dummy bytes to let MISO flow
       for (_ <- 0 until 16) spi.spiXferByte(0x00)
-      dut.io.spi_mosi_valid.poke(false.B)
-      dut.clock.step(50)
+      spi.csbDeassert()
 
       val got = spi.waitTlACapture(countBefore + 1, 300)
       assert(got, "TL-A fired after read frame")
@@ -267,12 +304,11 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
       val spi = new SpiDriver(dut)
       spi.reset()
 
-      dut.io.spi_mosi_valid.poke(true.B)
+      spi.csbAssert()
       spi.spiSendHeader(0x01, 0x0000AA55L, 0x0000)
 
       val misoRaw = spi.collectMisoBits(384)
-      dut.io.spi_mosi_valid.poke(false.B)
-      dut.clock.step(20)
+      spi.csbDeassert()
 
       // Expected: address echo, LE bytes: 0x55, 0xAA
       val pattern = Array(0x55, 0xAA)
@@ -294,12 +330,10 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
 
       val countBefore = dut.io.tl_a_cap_count.peek().litValue.toLong
 
-      dut.io.spi_mosi_valid.poke(true.B)
+      spi.csbAssert()
       spi.spiSendHeader(0x02, 0xDEAD0000L, 0x0000)
-      // Send 16 bytes of write data: 0x01..0x10
       for (i <- 0 until 16) spi.spiXferByte((i + 1) & 0xFF)
-      dut.io.spi_mosi_valid.poke(false.B)
-      dut.clock.step(50)
+      spi.csbDeassert()
 
       val got = spi.waitTlACapture(countBefore + 1)
       assert(got, "TL-A fired after write frame")
@@ -323,15 +357,11 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
       val countBefore = dut.io.tl_a_cap_count.peek().litValue.toLong
       spi.resetFirstCapture()
 
-      // 2-beat write: op=0x02, addr=0xBEEF0000, len=1
-      dut.io.spi_mosi_valid.poke(true.B)
+      spi.csbAssert()
       spi.spiSendHeader(0x02, 0xBEEF0000L, 0x0001)
-      // Beat 0: 0x10..0x1F
       for (i <- 0 until 16) spi.spiXferByte((i + 0x10) & 0xFF)
-      // Beat 1: 0x20..0x2F
       for (i <- 0 until 16) spi.spiXferByte((i + 0x20) & 0xFF)
-      dut.io.spi_mosi_valid.poke(false.B)
-      dut.clock.step(50)
+      spi.csbDeassert()
 
       val got = spi.waitTlACapture(countBefore + 2, 400)
       assert(got, "TL-A fired twice for 2-beat write")
@@ -356,9 +386,9 @@ class Spi2TLULV2Spec extends AnyFreeSpec with ChiselSim {
       spi.reset()
 
       for (i <- 0 until 5) {
-        dut.io.spi_mosi_valid.poke(true.B)
+        spi.csbAssert()
         spi.spiSendHeader(0x01, 0x10000000L + (i << 4), 0x0000)
-        spi.idle(30)
+        spi.csbDeassert()
       }
       assert(true, "5 rapid frames without crash")
     }
