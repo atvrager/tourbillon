@@ -22,7 +22,7 @@ TOOLCHAIN_ARCHIVE="toolchain_coralnpu_v2_cheri.tar.xz"
 
 # SHA-256 checksum of the toolchain archive.
 # Update this when the toolchain version changes.
-: "${CHERI_TOOLCHAIN_SHA:=TO_BE_SET_AFTER_FIRST_DOWNLOAD}"
+: "${CHERI_TOOLCHAIN_SHA:=e35882541fb7c11ce2e7b65202b6861336abebafe84d00f056254ba9c67122ce}"
 
 # Download URL
 : "${CHERI_TOOLCHAIN_URL:=https://storage.googleapis.com/shodan-public-artifacts/toolchain_coralnpu_v2_cheri.tar.xz}"

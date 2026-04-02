@@ -312,16 +312,18 @@ package cheri_pkg;
   localparam [4:0] SCR_MTDC   = 5'd30;
 
   // -----------------------------------------------------------------------
-  // RVY instruction encoding constants (opcode OP = 0110011)
+  // RVY instruction encoding constants
   // -----------------------------------------------------------------------
+  // CHERI R-type instructions use standard OP opcode (0110011) with
+  // new funct7 values per the RISC-V Y extension spec.
 
-  // CHERI R-type funct7 values
-  localparam [6:0] CHERI_F7_YADD_GRP   = 7'b0000110;  // YADD/YADDRW/YPERMC
+  // CHERI R-type funct7 values (opcode = OP = 0110011)
+  localparam [6:0] CHERI_F7_YADD_GRP   = 7'b0000110;  // YADD/YADDRW/YPERMC (funct3 selects)
   localparam [6:0] CHERI_F7_YBNDS_GRP  = 7'b0000111;  // YBNDSW/YBNDSRW
   localparam [6:0] CHERI_F7_UNARY      = 7'b0001000;  // Unary cap inspection group
   localparam [6:0] CHERI_F7_PACKY      = 7'b0000100;  // PACKY (clear tag)
 
-  // Unary sub-opcodes (encoded in rs2 field)
+  // Unary sub-opcodes (encoded in rs2 field, funct7=0001000)
   localparam [4:0] CHERI_UNARY_YTAGR   = 5'b00000;   // Read tag
   localparam [4:0] CHERI_UNARY_YPERMR  = 5'b00001;   // Read permissions
   localparam [4:0] CHERI_UNARY_YTYPER  = 5'b00010;   // Read otype
@@ -331,7 +333,7 @@ package cheri_pkg;
   localparam [4:0] CHERI_UNARY_YLENR   = 5'b00110;   // Read length
   localparam [4:0] CHERI_UNARY_YAMASK  = 5'b00111;   // Alignment mask
 
-  // Standard RISC-V opcodes (for reference in dispatch)
+  // Standard RISC-V opcodes (for dispatch)
   localparam [6:0] RV_OP_R_TYPE = 7'b0110011;
   localparam [6:0] RV_OP_AUIPC  = 7'b0010111;
   localparam [6:0] RV_OP_JAL    = 7'b1101111;
