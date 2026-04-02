@@ -88,7 +88,10 @@ fn dot_rv32i_structure() {
     assert!(dot.contains("CPUCore_fetch_q"), "missing fetch_q edge");
     assert!(dot.contains("CPUCore_decode_q"), "missing decode_q edge");
     assert!(dot.contains("CPUCore_wb_q"), "missing wb_q edge");
-    assert!(dot.contains("CPUCore_next_pc_q"), "missing next_pc_q edge");
+    assert!(
+        dot.contains("CPUCore_next_pcc_q"),
+        "missing next_pcc_q edge"
+    );
 
     // Cell self-loops
     assert!(

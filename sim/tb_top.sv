@@ -7,6 +7,7 @@
 // CPUCore sub-pipe ports are prefixed with CPUCore_ in the generated SV.
 
 import rv32i_pkg::*;
+import cheri_pkg::*;
 
 /* verilator lint_off UNOPTFLAT */
 // Known combinational loops through CPU↔memory ready/valid handshakes.
@@ -140,7 +141,8 @@ module tb_top (
         end
     end
 
-    // next_pc_q is pre-loaded with reset PC (0x80000000) by FIFO INIT_VALUE
+    // next_pcc_q is pre-loaded with root PCC capability at 0x80000000 by FIFO INIT_VALUE
+    // (tag bit is 0 in Phase 1 — no tag checking yet)
 
     // -------------------------------------------------------------------------
     // tohost monitor — watch for dmem writes to 0x80001000

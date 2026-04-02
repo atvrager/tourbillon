@@ -49,7 +49,7 @@ verilate: sv
 		\
 		-j $(NPROC) \
 		-I$(SV_DIR) \
-		tb_top.sv rv32i_pkg.sv mem_model.sv \
+		tb_top.sv rv32i_pkg.sv cheri_pkg.sv mem_model.sv \
 		$(SV_DIR)/*.sv \
 		tb_cpu.cpp \
 		-o sim_cpu \
@@ -113,7 +113,7 @@ soc-build: soc-sv
 		--top-module soc_top \
 		-j $(NPROC) \
 		-I$(SOC_SV_DIR) \
-		soc_top.sv rv32i_pkg.sv mem_model.sv \
+		soc_top.sv rv32i_pkg.sv cheri_pkg.sv mem_model.sv \
 		$(SOC_SV_DIR)/*.sv \
 		soc_tb.cpp \
 		-o sim_soc \
@@ -159,7 +159,7 @@ RTL_DIR := ../rtl
 rtl-check: soc-sv
 	$(VERILATOR) --lint-only -Wall -Wno-fatal \
 		-I$(SOC_SV_DIR) \
-		$(RTL_DIR)/marie_top.sv $(RTL_DIR)/xilinx_stubs.sv rv32i_pkg.sv \
+		$(RTL_DIR)/marie_top.sv $(RTL_DIR)/xilinx_stubs.sv rv32i_pkg.sv cheri_pkg.sv \
 		$(SOC_SV_DIR)/*.sv
 
 # =========================================================================
@@ -278,6 +278,31 @@ spi-v2-build: spi-v2-sv
 
 spi-v2-test: spi-v2-build
 	$(SPIV2_BIN)
+
+# =========================================================================
+# CHERI toolchain
+# =========================================================================
+
+CHERI_TOOLCHAIN_DIR ?= $(HOME)/.cheri-toolchain
+CHERI_CC     = $(CHERI_TOOLCHAIN_DIR)/bin/clang
+CHERI_TARGET = riscv32-unknown-none-elfcap
+CHERI_MARCH  = rv32imacxcheri
+CHERI_MABI   = il32pc64
+
+.PHONY: cheri-toolchain cheri-check
+
+# Fetch and verify CHERI toolchain
+cheri-toolchain:
+	CHERI_TOOLCHAIN_DIR=$(CHERI_TOOLCHAIN_DIR) bash fetch_cheri_toolchain.sh
+
+# Check CHERI toolchain is available
+cheri-check:
+	@if [ ! -x "$(CHERI_CC)" ]; then \
+		echo "ERROR: CHERI toolchain not found at $(CHERI_CC)"; \
+		echo "Run: make cheri-toolchain"; \
+		exit 1; \
+	fi
+	@echo "CHERI toolchain: $$($(CHERI_CC) --version 2>&1 | head -1)"
 
 # Remove build artifacts
 clean:

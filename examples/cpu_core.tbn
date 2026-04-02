@@ -1,18 +1,30 @@
 -- ============================================================
--- CPU Core — shared between Marie Antoinette SoC and standalone
+-- CPU Core — RV32IY CHERI Capability-Enhanced Pipeline
 -- ============================================================
--- Split-phase, non-speculative RV32I pipeline.
+-- Split-phase, non-speculative RV32IY pipeline with 65-bit
+-- capability registers. Every memory access goes through
+-- hardware-enforced capabilities (purecap mode).
+--
+-- Phase 1: 65-bit regfile, PCC-based fetch, capability-aware
+-- data path. Bounds checking deferred to Phase 2.
+--
 -- Extracted for multi-file compilation: tbn build cpu_core.tbn <target>.tbn
 
 -- ============================================================
 -- Type definitions
 -- ============================================================
 
+type Cap    = Bits 65
 type Word   = Bits 32
 type Addr   = Bits 32
 type RegIdx = Bits 5
 
 enum MemOp = Load | Store | None
+
+-- Root PCC init value: 0xFFC0_8180_8000_0000
+-- Metadata: SDP=0x3F, AP=RWX, GL=1, CT=0, EF=0, E=24, full bounds.
+-- Address: 0x80000000 (reset vector).
+-- Tag bit is 0 (u64 limitation) — acceptable for Phase 1 (no tag checking).
 
 record Decoded {
     op      : Bits 4
@@ -21,6 +33,7 @@ record Decoded {
     rs2_val : Word
     imm     : Word
     pc      : Addr
+    pcc     : Cap
     mem     : MemOp
     wb      : Bool
     is_br   : Bool
@@ -39,45 +52,50 @@ type BusResp = Word
 -- Stash record for split-phase Execute: saves decoded instruction fields
 -- across the memory request/response boundary.
 record ExecStash {
-    phase   : Bits 32
-    rd      : RegIdx
-    funct3  : Bits 3
-    rs2_val : Word
-    result  : Word
-    next_pc : Addr
+    phase    : Bits 32
+    rd       : RegIdx
+    funct3   : Bits 3
+    rs2_val  : Word
+    result   : Word
+    next_pcc : Cap
 }
 
 -- ============================================================
 -- CPU pipeline stages
 -- ============================================================
 
--- Non-speculative Fetch: waits for next_pc from Execute before fetching.
--- No branch speculation, no redirect queue. One instruction at a time.
--- First fetch uses the reset PC (0x80000000). Subsequent fetches use
--- next_pc provided by Execute after the instruction completes.
+-- Non-speculative Fetch: waits for next_pcc from Execute before fetching.
+-- PCC (Program Counter Capability) is a full 65-bit capability.
+-- Instruction address is extracted from PCC's address field.
 
 process Fetch {
-    consumes: next_pc        : Queue(Addr)
-    produces: fetch_out      : Queue(Addr × Word)
+    consumes: next_pcc      : Queue(Cap)
+    produces: fetch_out     : Queue(Cap × Word)
     consumes: imem_read_resp : Queue(Word)
     produces: imem_read_req  : Queue(Addr)
     produces: imem_write_req : Queue(Addr × Word)
 
     rule tick {
-        let target = next_pc.take()
+        let pcc = next_pcc.take()
+        let target = cap_get_addr(pcc)
         imem_read_req.put(target)
         let instr = imem_read_resp.take()
-        fetch_out.put((target, instr))
+        fetch_out.put((pcc, instr))
     }
 }
 
+-- Decode: reads 65-bit capability registers, extracts 32-bit address
+-- fields for ALU operands. Passes PCC through to Execute for
+-- reconstructing next_pcc.
+
 process Decode {
-    consumes: fetch_in   : Queue(Addr × Word)
+    consumes: fetch_in   : Queue(Cap × Word)
     produces: decode_out : Queue(Decoded)
-    peeks:    regfile    : Cell(Array(32, Word))
+    peeks:    regfile    : Cell(Array(32, Cap))
 
     rule crack {
-        let (pc, raw) = fetch_in.take()
+        let (pcc, raw) = fetch_in.take()
+        let pc = cap_get_addr(pcc)
         match regfile.peek() {
             Some(regs) => {
                 let rd      = decode_rd(raw)
@@ -94,10 +112,11 @@ process Decode {
                 decode_out.put(Decoded {
                     op      = alu_op,
                     rd      = rd,
-                    rs1_val = regs[rs1],
-                    rs2_val = regs[rs2],
+                    rs1_val = cap_get_addr(regs[rs1]),
+                    rs2_val = cap_get_addr(regs[rs2]),
                     imm     = imm,
                     pc      = pc,
+                    pcc     = pcc,
                     mem     = mem_op,
                     wb      = needs_wb,
                     is_br   = is_br,
@@ -117,16 +136,14 @@ process Decode {
 -- Phase 0: idle — take decoded instruction, compute, send mem request if needed
 -- Phase 1: waiting for load response (try_take on dmem_read_resp)
 -- Phase 2: waiting for store read-back
--- Uses ExecStash Cell to save instruction fields across phases.
-
--- Non-speculative Execute: always sends next_pc when instruction completes.
--- For non-memory instructions, next_pc is sent immediately.
--- For loads/stores, next_pc is sent after the response arrives.
+--
+-- Integer results are written as null capabilities (tag=0, meta=0, addr=result).
+-- Next PCC is derived from the current instruction's PCC with updated address.
 
 process Execute {
     consumes: exec_in        : Queue(Decoded)
-    produces: next_pc        : Queue(Addr)
-    produces: writeback      : Queue(Bool × RegIdx × Word)
+    produces: next_pcc       : Queue(Cap)
+    produces: writeback      : Queue(Bool × RegIdx × Cap)
     produces: dmem_read_req  : Queue(Addr)
     consumes: dmem_read_resp : Queue(Word)
     produces: dmem_write_req : Queue(Addr × Word)
@@ -139,8 +156,10 @@ process Execute {
                 Some(d) => {
                     let result = compute_result(d.op, d.opcode, d.rs1_val, d.rs2_val, d.imm, d.pc)
 
-                    -- Compute next PC: branch target if taken, else pc+4
+                    -- Compute next PC address: branch target if taken, else pc+4
                     let npc = compute_next_pc(d.opcode, d.funct3, d.rs1_val, d.rs2_val, d.imm, d.pc)
+                    -- Derive next PCC: same capability metadata, new address
+                    let npcc = cap_set_addr(d.pcc, npc)
 
                     match d.mem {
                         Load => {
@@ -148,7 +167,7 @@ process Execute {
                             stash.put(ExecStash {
                                 phase = 1, rd = d.rd, funct3 = d.funct3,
                                 rs2_val = d.rs2_val, result = result,
-                                next_pc = npc
+                                next_pcc = npcc
                             })
                         }
                         Store => {
@@ -156,15 +175,15 @@ process Execute {
                             stash.put(ExecStash {
                                 phase = 2, rd = d.rd, funct3 = d.funct3,
                                 rs2_val = d.rs2_val, result = result,
-                                next_pc = npc
+                                next_pcc = npcc
                             })
                         }
                         None => {
-                            writeback.put((d.wb, d.rd, result))
-                            next_pc.put(npc)
+                            writeback.put((d.wb, d.rd, cap_from_int(result)))
+                            next_pcc.put(npcc)
                             stash.put(ExecStash {
                                 phase = 0, rd = 0, funct3 = 0,
-                                rs2_val = 0, result = 0, next_pc = 0
+                                rs2_val = 0, result = 0, next_pcc = 0
                             })
                         }
                     }
@@ -178,11 +197,11 @@ process Execute {
                 match dmem_read_resp.try_take() {
                     Some(raw_word) => {
                         let val = load_extend(s.funct3, raw_word, s.result[1:0])
-                        writeback.put((true, s.rd, val))
-                        next_pc.put(s.next_pc)
+                        writeback.put((true, s.rd, cap_from_int(val)))
+                        next_pcc.put(s.next_pcc)
                         stash.put(ExecStash {
                             phase = 0, rd = 0, funct3 = 0,
-                            rs2_val = 0, result = 0, next_pc = 0
+                            rs2_val = 0, result = 0, next_pcc = 0
                         })
                     }
                     None => {
@@ -195,11 +214,11 @@ process Execute {
                         Some(old_word) => {
                             let merged = store_merge(s.funct3, old_word, s.rs2_val, s.result[1:0])
                             dmem_write_req.put((s.result, merged))
-                            writeback.put((false, s.rd, s.result))
-                            next_pc.put(s.next_pc)
+                            writeback.put((false, s.rd, cap_from_int(s.result)))
+                            next_pcc.put(s.next_pcc)
                             stash.put(ExecStash {
                                 phase = 0, rd = 0, funct3 = 0,
-                                rs2_val = 0, result = 0, next_pc = 0
+                                rs2_val = 0, result = 0, next_pcc = 0
                             })
                         }
                         None => {
@@ -214,9 +233,13 @@ process Execute {
     }
 }
 
+-- Writeback: commits 65-bit capability values to the register file.
+-- x0 is hardwired to null capability (all zeros) — writes to x0 are discarded
+-- by the wb flag being false for instructions with rd=x0.
+
 process Writeback {
-    consumes: wb_in   : Queue(Bool × RegIdx × Word)
-    state:    regfile : Cell(Array(32, Word), init = 0)
+    consumes: wb_in   : Queue(Bool × RegIdx × Cap)
+    state:    regfile : Cell(Array(32, Cap), init = 0)
 
     rule commit {
         let (wb, rd, val) = wb_in.take()
@@ -234,14 +257,14 @@ process Writeback {
 -- ============================================================
 
 pipe CPUCore {
-    -- Inter-stage queues
-    let fetch_q  = Queue(Addr × Word, depth = 1)
+    -- Inter-stage queues (widened for 65-bit capabilities)
+    let fetch_q  = Queue(Cap × Word, depth = 1)
     let decode_q = Queue(Decoded, depth = 1)
-    let wb_q     = Queue(Bool × RegIdx × Word, depth = 1)
+    let wb_q     = Queue(Bool × RegIdx × Cap, depth = 1)
 
-    -- Next-PC queue: Execute → Fetch (non-speculative, no redirect needed)
-    -- Pre-loaded with reset PC via FIFO INIT_VALUE on reset.
-    let next_pc_q = Queue(Addr, depth = 1, init = 0x8000_0000)
+    -- Next-PCC queue: Execute → Fetch (carries full capability)
+    -- Pre-loaded with root PCC at reset vector 0x80000000.
+    let next_pcc_q = Queue(Cap, depth = 1, init = 0xFFC0818080000000)
 
     -- Instruction memory (local, fast path)
     let imem = Memory(Addr → Word, depth = 4096, latency = 1)
@@ -253,7 +276,7 @@ pipe CPUCore {
 
     Fetch {
         fetch_out      = fetch_q,
-        next_pc        = next_pc_q,
+        next_pcc       = next_pcc_q,
         imem_read_req  = imem_read_req,
         imem_read_resp = imem_read_resp,
         imem_write_req = imem_write_req
@@ -265,7 +288,7 @@ pipe CPUCore {
     }
     Execute {
         exec_in        = decode_q,
-        next_pc        = next_pc_q,
+        next_pcc       = next_pcc_q,
         writeback      = wb_q,
         dmem_read_req  = dmem_rd_req,
         dmem_read_resp = dmem_rd_resp,
