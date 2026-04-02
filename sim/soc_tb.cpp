@@ -207,7 +207,8 @@ int main(int argc, char **argv) {
     uint64_t dev_next  = 10;
     unsigned xbar_phase = 0;  // 0→3, 1→3, 2→4 ticks (avg 3.33)
 
-    for (t = t; t < (max_cycles * 10 + t) && (result < 0 || drain_remaining > 0); t++) {
+    uint64_t t_end = t + max_cycles * 10;
+    for (; t < t_end && (result < 0 || drain_remaining > 0); t++) {
         bool any_toggle = false;
 
         if (t >= cpu_next) {

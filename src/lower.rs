@@ -1012,9 +1012,11 @@ impl<'a> SvEmitter<'a> {
                     self.clock_for_instance(&self.net.network.graph[src_node].instance_name);
                 let rd_clk =
                     self.clock_for_instance(&self.net.network.graph[dst_node].instance_name);
-                // Use system reset for both sides to keep pointers synchronized
-                let wr_rst = "rst_n".to_string();
-                let rd_rst = "rst_n".to_string();
+                // Use domain-specific resets for each side
+                let wr_rst =
+                    self.reset_for_instance(&self.net.network.graph[src_node].instance_name);
+                let rd_rst =
+                    self.reset_for_instance(&self.net.network.graph[dst_node].instance_name);
 
                 self.line(&format!(
                     "tbn_async_fifo #(.WIDTH({w}), .DEPTH({})) aq_{sname}_inst (",
