@@ -12,6 +12,7 @@
 --   Xbar → AsyncQueue → UartPhy (dev domain) → DPI uart_tx       [region 0x1]
 --   Xbar → AsyncQueue → ManifestDevice (dev domain) → registers  [region 0x0]
 --   Xbar → AsyncQueue → ClocksDevice (dev domain) → combinational[region 0x2]
+--   Xbar → AsyncQueue → SwatchDevice (dev domain) → free-running [region 0x3]
 --
 -- imem: Direct Memory in cpu domain (fast path, no CDC)
 -- dmem: Through bus fabric with 6 async FIFOs across 3 clock domains
@@ -27,9 +28,14 @@ const MEM_REGION      = 0x8
 const UART_REGION     = 0x1
 const MANIFEST_REGION = 0x0
 const CLOCKS_REGION   = 0x2
+const SWATCH_REGION   = 0x3
 
 -- Baud rate divisor: DEV_FREQ_HZ / 921600 ≈ 54 (50 MHz dev clock)
 const BAUD_DIV = 54
+
+-- Swatch Internet Time: ticks per centibeat at 50 MHz
+-- 1 beat = 86.4s, 1 centibeat = 0.864s, 0.864 × 50_000_000 = 43_200_000
+const SWATCH_TICKS_PER_CENTIBEAT = 43200000
 
 -- Clock frequencies: resolved from soc_pkg.sv at SV compile time (single source of truth)
 const CPU_FREQ_HZ  = external
@@ -101,7 +107,7 @@ process CpuDmemAdapter {
 -- ============================================================
 
 -- Split-phase Xbar: single rule with try_take for response polling
--- Phase 0: decode, phases 1-4: wait for dev0/1/2/3 response
+-- Phase 0: decode, phases 1-5: wait for dev0/1/2/3/4 response
 process Xbar {
     consumes: host_req  : Queue(BusReq)
     produces: host_resp : Queue(BusResp)
@@ -113,6 +119,8 @@ process Xbar {
     consumes: dev2_resp : Queue(BusResp)
     produces: dev3_req  : Queue(BusReq)
     consumes: dev3_resp : Queue(BusResp)
+    produces: dev4_req  : Queue(BusReq)
+    consumes: dev4_resp : Queue(BusResp)
     state:    xphase    : Cell(Bits 32, init = 0)
 
     rule tick {
@@ -137,8 +145,13 @@ process Xbar {
                                     dev3_req.put(req)
                                     xphase.put(4)
                                 } else {
-                                    host_resp.put(0)
-                                    xphase.put(0)
+                                    if region == SWATCH_REGION {
+                                        dev4_req.put(req)
+                                        xphase.put(5)
+                                    } else {
+                                        host_resp.put(0)
+                                        xphase.put(0)
+                                    }
                                 }
                             }
                         }
@@ -174,12 +187,22 @@ process Xbar {
                             None => { xphase.put(p) }
                         }
                     } else {
-                        match dev3_resp.try_take() {
-                            Some(resp) => {
-                                host_resp.put(resp)
-                                xphase.put(0)
+                        if p == 4 {
+                            match dev3_resp.try_take() {
+                                Some(resp) => {
+                                    host_resp.put(resp)
+                                    xphase.put(0)
+                                }
+                                None => { xphase.put(p) }
                             }
-                            None => { xphase.put(p) }
+                        } else {
+                            match dev4_resp.try_take() {
+                                Some(resp) => {
+                                    host_resp.put(resp)
+                                    xphase.put(0)
+                                }
+                                None => { xphase.put(p) }
+                            }
                         }
                     }
                 }
@@ -453,6 +476,100 @@ process ClocksDevice {
 }
 
 -- ============================================================
+-- Swatch Internet Time: @beats since midnight BMT
+-- ============================================================
+-- The day divided into 1000 .beats (1 beat = 86.4 seconds).
+-- No time zones, no daylight saving — just vibes.
+-- Two-stage prescaler: ticks → centibeats → beats (mod 1000).
+-- Free-running: `advance` fires every cycle the bus isn't active.
+-- `handle` has higher priority (listed first) and suppresses
+-- `advance` for one tick when a bus request arrives — negligible
+-- drift (1 tick out of 43.2M per centibeat).
+--
+-- Register map (word offset = addr[3:2]):
+--   Read  0: current .beat (0–999)
+--   Read  1: centibeat (0–99)
+--   Read  2: raw prescaler (ticks within current centibeat)
+--   Write 0: set .beat (firmware seeds from real time)
+--   Write 1: set centibeat
+
+process SwatchDevice {
+    consumes: req       : Queue(BusReq)
+    produces: resp      : Queue(BusResp)
+    state:    prescaler : Cell(Bits 32, init = 0)
+    state:    centibeat : Cell(Bits 7, init = 0)
+    state:    beat      : Cell(Bits 10, init = 0)
+
+    -- Higher priority: handle bus requests
+    rule handle {
+        let r  = req.take()
+        let ps = prescaler.take()
+        let cb = centibeat.take()
+        let bt = beat.take()
+
+        if r.we {
+            let off = r.addr[3:2]
+            if off == 0 {
+                beat.put(r.data[9:0])
+                centibeat.put(cb)
+                prescaler.put(0)
+            } else {
+                if off == 1 {
+                    centibeat.put(r.data[6:0])
+                    beat.put(bt)
+                    prescaler.put(0)
+                } else {
+                    beat.put(bt)
+                    centibeat.put(cb)
+                    prescaler.put(ps)
+                }
+            }
+            resp.put(0)
+        } else {
+            let off = r.addr[3:2]
+            if off == 0 {
+                resp.put(bt)
+            } else {
+                if off == 1 {
+                    resp.put(cb)
+                } else {
+                    resp.put(ps)
+                }
+            }
+            beat.put(bt)
+            centibeat.put(cb)
+            prescaler.put(ps)
+        }
+    }
+
+    -- Lower priority: free-running prescaler (fires every other cycle)
+    rule advance {
+        let ps = prescaler.take()
+        let cb = centibeat.take()
+        let bt = beat.take()
+
+        if ps == SWATCH_TICKS_PER_CENTIBEAT {
+            prescaler.put(0)
+            if cb == 99 {
+                centibeat.put(0)
+                if bt == 999 {
+                    beat.put(0)
+                } else {
+                    beat.put(bt + 1)
+                }
+            } else {
+                centibeat.put(cb + 1)
+                beat.put(bt)
+            }
+        } else {
+            prescaler.put(ps + 1)
+            centibeat.put(cb)
+            beat.put(bt)
+        }
+    }
+}
+
+-- ============================================================
 -- Device manifest: hardware device discovery peripheral
 -- ============================================================
 -- Pre-populated with 2 slots (memory at region 0x8, UART at region 0x1).
@@ -484,6 +601,9 @@ const SLOT0_INIT = 0x00000000000000008000000000000000FFFFFFFF00000000564C4944
 -- Pre-populated slot 1: UART device (region 0x1 → base 0x10000000)
 const SLOT1_INIT = 0x00000000000000001000000000000000FFFFFFFF00000000564C4944
 
+-- Pre-populated slot 2: Swatch Internet Time (region 0x3 → base 0x30000000, key = "SWCH")
+const SLOT2_INIT = 0x00000000535743483000000000000000FFFFFFFF00000000564C4944
+
 -- slot_read and slot_write are SV package functions from manifest_pkg.
 -- They are called directly (no external fn declaration needed) and resolve
 -- at SV compile time via package import. No DPI — fully synthesizable.
@@ -492,11 +612,11 @@ process ManifestDevice {
     consumes: req       : Queue(BusReq)
     produces: resp      : Queue(BusResp)
     state:    sealed    : Cell(Bits 32, init = 0)
-    state:    claim_ctr : Cell(Bits 32, init = 2)
-    state:    populated : Cell(Bits 32, init = 2)
+    state:    claim_ctr : Cell(Bits 32, init = 3)
+    state:    populated : Cell(Bits 32, init = 3)
     state:    slot0     : Cell(Bits 224, init = SLOT0_INIT)
     state:    slot1     : Cell(Bits 224, init = SLOT1_INIT)
-    state:    slot2     : Cell(Bits 224, init = 0)
+    state:    slot2     : Cell(Bits 224, init = SLOT2_INIT)
     state:    slot3     : Cell(Bits 224, init = 0)
 
     rule handle {
@@ -709,6 +829,10 @@ pipe Marie {
     let clk_bus_req   = AsyncQueue(BusReq,  depth = 4)
     let clk_bus_resp  = AsyncQueue(BusResp, depth = 4)
 
+    -- Bus fabric queues (xbar → dev boundary, swatch)
+    let swt_bus_req   = AsyncQueue(BusReq,  depth = 4)
+    let swt_bus_resp  = AsyncQueue(BusResp, depth = 4)
+
     -- Device memory (dev domain)
     let dev_mem = Memory(Addr → Word, depth = 16384, latency = 1)
 
@@ -746,7 +870,9 @@ pipe Marie {
         dev2_req  = mfst_bus_req,
         dev2_resp = mfst_bus_resp,
         dev3_req  = clk_bus_req,
-        dev3_resp = clk_bus_resp
+        dev3_resp = clk_bus_resp,
+        dev4_req  = swt_bus_req,
+        dev4_resp = swt_bus_resp
     }
 
     -- Memory device (dev domain)
@@ -774,5 +900,11 @@ pipe Marie {
     ClocksDevice [dev] {
         req  = clk_bus_req,
         resp = clk_bus_resp
+    }
+
+    -- Swatch Internet Time (dev domain) — @beats since midnight BMT
+    SwatchDevice [dev] {
+        req  = swt_bus_req,
+        resp = swt_bus_resp
     }
 }

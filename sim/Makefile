@@ -31,13 +31,13 @@ SPIV2_OBJ_DIR := spi_v2_obj_dir
 SPIV2_BIN     := $(SPIV2_OBJ_DIR)/sim_spi_v2
 
 .PHONY: ci sv verilate build run test-smoke test-hex riscv-tests clean
-.PHONY: soc-sv soc-build soc-hello soc-riscv-tests soc-cheri-test soc-manifest-test rtl-check
+.PHONY: soc-sv soc-build soc-hello soc-riscv-tests soc-cheri-test soc-manifest-test soc-swatch-test rtl-check
 .PHONY: rtl-export rtl-export-standalone rtl-export-ext
 .PHONY: spi-sv spi-build spi-test
 .PHONY: spi-v2-sv spi-v2-build spi-v2-test
 
 # Run everything: compiler tests + all simulation targets
-ci: riscv-tests cheri-test soc-hello soc-riscv-tests soc-cheri-test soc-manifest-test rtl-check
+ci: riscv-tests cheri-test soc-hello soc-riscv-tests soc-cheri-test soc-manifest-test soc-swatch-test rtl-check
 
 # Generate SystemVerilog from Tourbillon source
 sv:
@@ -357,6 +357,14 @@ tests/manifest.elf: tests/manifest.S
 
 soc-manifest-test: soc-build tests/manifest.elf
 	$(SOC_BIN) tests/manifest.elf
+
+tests/swatch.elf: tests/swatch.S
+	$(AS) -march=rv32i -mabi=ilp32 -o tests/swatch.o tests/swatch.S
+	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/swatch.elf tests/swatch.o
+	@rm -f tests/swatch.o
+
+soc-swatch-test: soc-build tests/swatch.elf
+	$(SOC_BIN) tests/swatch.elf
 
 soc-cheri-test: soc-build $(CHERI_TESTS)
 	$(SOC_BIN) tests/cheri_basic.elf

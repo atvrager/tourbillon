@@ -66,10 +66,10 @@ _start:
     addi    x30, x30, 1
 
     # ------------------------------------------------------------------
-    # Test 4: Read POPULATED → 2
+    # Test 4: Read POPULATED → 3
     # ------------------------------------------------------------------
     lw      a1, OFF_POPULATED(a0)
-    li      a2, 2
+    li      a2, 3
     bne     a1, a2, fail
     addi    x30, x30, 1
 
@@ -111,16 +111,16 @@ _start:
     addi    x30, x30, 1
 
     # ------------------------------------------------------------------
-    # Test 9: CLAIM → 2 (next free slot), then CLAIM again → 3
+    # Test 9: CLAIM → 3 (next free slot, slots 0-2 pre-populated)
     # ------------------------------------------------------------------
     lw      a1, OFF_CLAIM(a0)   # first CLAIM
-    li      a2, 2
+    li      a2, 3
     bne     a1, a2, fail
     addi    x30, x30, 1
 
-    # Test 10: Second CLAIM → 3
+    # Test 10: Second CLAIM → 0xFFFFFFFF (all 4 slots allocated)
     lw      a1, OFF_CLAIM(a0)
-    li      a2, 3
+    li      a2, -1              # 0xFFFFFFFF
     bne     a1, a2, fail
     addi    x30, x30, 1
 
