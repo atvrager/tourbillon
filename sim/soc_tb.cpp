@@ -22,6 +22,14 @@
 #include <unistd.h>
 
 // ---------------------------------------------------------------------------
+// Clock frequencies — must match soc_pkg.sv (the single source of truth)
+// C++ can't import SV packages, so these are maintained as defines.
+// ---------------------------------------------------------------------------
+#define CPU_FREQ_HZ   100000000  // 100 MHz
+#define XBAR_FREQ_HZ  150000000  // 150 MHz
+#define DEV_FREQ_HZ    50000000  //  50 MHz
+
+// ---------------------------------------------------------------------------
 // DPI: uart_sim_tx — called from soc_top.sv when a full byte is deserialized
 // from the UART TX pin bit stream
 // ---------------------------------------------------------------------------

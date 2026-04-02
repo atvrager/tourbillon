@@ -251,7 +251,8 @@ fn dpi_type_str(ty: &Ty) -> String {
         Ty::Bits(n) if *n <= 8 => "byte unsigned".to_string(),
         Ty::Bits(n) if *n <= 16 => "shortint unsigned".to_string(),
         Ty::Bits(n) if *n <= 32 => "int unsigned".to_string(),
-        Ty::Bits(_) => "longint unsigned".to_string(),
+        Ty::Bits(n) if *n <= 64 => "longint unsigned".to_string(),
+        Ty::Bits(n) => format!("bit [{}:0]", n - 1),
         _ => "int unsigned".to_string(),
     }
 }
@@ -766,7 +767,11 @@ impl<'a> SvEmitter<'a> {
         if constants.is_empty() {
             return;
         }
-        let mut sorted: Vec<(&String, &u64)> = constants.iter().collect();
+        let ext = &self.net.network.external_constants;
+        let mut sorted: Vec<_> = constants
+            .iter()
+            .filter(|(name, _)| !ext.contains(*name))
+            .collect();
         sorted.sort_by_key(|(name, _)| (*name).clone());
         for (name, value) in sorted {
             self.line(&format!("localparam {name} = {value};"));
@@ -1048,7 +1053,11 @@ impl<'a> SvEmitter<'a> {
             let fifo_clk = self.clock_for_instance(&self.net.network.graph[fifo_src].instance_name);
             let fifo_rst = self.reset_for_instance(&self.net.network.graph[fifo_src].instance_name);
             let init_value = match &edge.kind {
-                QueueEdgeKind::Queue { init_tokens, .. } if *init_tokens > 0 => Some(*init_tokens),
+                QueueEdgeKind::Queue { init_tokens, .. }
+                    if *init_tokens > num_bigint::BigUint::ZERO =>
+                {
+                    Some(init_tokens.clone())
+                }
                 _ => None,
             };
             if let Some(val) = init_value {
@@ -1411,10 +1420,10 @@ impl<'a> SvEmitter<'a> {
             if let QueueEdgeKind::Cell { init, .. } = &edge.kind {
                 let sname = sanitize(&edge.name);
                 let w = bit_width(&edge.elem_ty);
-                let init_val = init.map_or("'0".to_string(), |v| {
+                let init_val = init.as_ref().map_or("'0".to_string(), |v| {
                     if w > 1 {
                         format!("{w}'d{v}")
-                    } else if v <= 1 {
+                    } else if *v <= num_bigint::BigUint::from(1u32) {
                         format!("1'b{v}")
                     } else {
                         format!("{v}")
@@ -1588,8 +1597,13 @@ impl<'a> SvEmitter<'a> {
             Expr::Var(name) => {
                 if let Some(sv) = ctx.vars.get(name) {
                     sv.clone()
-                } else if let Some(&val) = self.net.network.constants.get(name) {
-                    format!("{val}")
+                } else if self.net.network.constants.contains_key(name) {
+                    if self.net.network.external_constants.contains(name) {
+                        // External constant: emit as bare SV identifier (resolved via package import)
+                        name.clone()
+                    } else {
+                        format!("{}", self.net.network.constants[name])
+                    }
                 } else {
                     name.clone()
                 }

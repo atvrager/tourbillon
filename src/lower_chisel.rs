@@ -318,7 +318,11 @@ impl<'a> ChiselEmitter<'a> {
         if constants.is_empty() {
             return;
         }
-        let mut sorted: Vec<(&String, &u64)> = constants.iter().collect();
+        let ext = &self.net.network.external_constants;
+        let mut sorted: Vec<_> = constants
+            .iter()
+            .filter(|(name, _)| !ext.contains(*name))
+            .collect();
         sorted.sort_by_key(|(name, _)| (*name).clone());
         for (name, value) in sorted {
             self.line(&format!("val {name} = {value}.U"));
@@ -337,7 +341,7 @@ impl<'a> ChiselEmitter<'a> {
             if let QueueEdgeKind::Cell { init, .. } = &edge.kind {
                 let sname = sanitize(&edge.name);
                 let w = bit_width(&edge.elem_ty);
-                let init_val = init.map_or("0".to_string(), |v| format!("{v}"));
+                let init_val = init.as_ref().map_or("0".to_string(), |v| format!("{v}"));
 
                 // Determine clock domain from the owning process node
                 let (src_node, _) = self.net.network.graph.edge_endpoints(edge_idx).unwrap();
@@ -399,8 +403,10 @@ impl<'a> ChiselEmitter<'a> {
                 self.line(&format!("q_{sname}.io.rd_rst := {rd_rst}"));
             } else {
                 let init_count = match &edge.kind {
-                    QueueEdgeKind::Queue { init_tokens, .. } if *init_tokens > 0 => {
-                        Some(*init_tokens)
+                    QueueEdgeKind::Queue { init_tokens, .. }
+                        if *init_tokens > num_bigint::BigUint::ZERO =>
+                    {
+                        Some(init_tokens.clone())
                     }
                     _ => None,
                 };
@@ -951,8 +957,12 @@ impl<'a> ChiselEmitter<'a> {
             Expr::Var(name) => {
                 if let Some(chisel) = ctx.vars.get(name) {
                     chisel.clone()
-                } else if let Some(&val) = self.net.network.constants.get(name) {
-                    format!("{val}.U")
+                } else if self.net.network.constants.contains_key(name) {
+                    if self.net.network.external_constants.contains(name) {
+                        name.clone()
+                    } else {
+                        format!("{}.U", self.net.network.constants[name])
+                    }
                 } else {
                     name.clone()
                 }

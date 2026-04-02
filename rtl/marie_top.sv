@@ -19,6 +19,8 @@
 
 import rv32i_pkg::*;
 import cheri_pkg::*;
+import soc_pkg::*;
+import manifest_pkg::*;
 
 module marie_top #(
     parameter STANDALONE  = 0,

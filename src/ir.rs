@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use num_bigint::BigUint;
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 
 use crate::ast::{Rule, Span};
@@ -19,7 +20,9 @@ pub struct ProcessNetwork {
     /// Instance name → domain name (None = default domain using clk/rst_n).
     pub domain_map: HashMap<String, Option<String>>,
     /// Compile-time constants: name → value (from `const` declarations).
-    pub constants: HashMap<String, u64>,
+    pub constants: HashMap<String, BigUint>,
+    /// Constants declared as `extern` — identifier resolved at SV compile time (no localparam).
+    pub external_constants: std::collections::HashSet<String>,
     /// External function signatures: name → (param types, optional return type).
     pub external_fns: HashMap<String, (Vec<Ty>, Option<Ty>)>,
 }
@@ -61,13 +64,13 @@ pub struct QueueEdge {
 pub enum QueueEdgeKind {
     Queue {
         /// Number of initial tokens pre-loaded at reset (from `init = N`).
-        init_tokens: u128,
+        init_tokens: BigUint,
         /// External queue — no FIFO instantiated, signals become module ports.
         is_external: bool,
     },
     Cell {
         peeker_instances: Vec<String>,
-        init: Option<u128>,
+        init: Option<BigUint>,
     },
     /// Async FIFO for clock domain crossing. No init tokens, no peekers.
     AsyncQueue,

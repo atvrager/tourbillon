@@ -38,7 +38,9 @@ pub enum Item {
 #[derive(Debug, Clone)]
 pub struct ConstDef {
     pub name: Spanned<String>,
-    pub value: u64,
+    pub value: num_bigint::BigUint,
+    /// `const FOO = extern` — identifier resolved at SV compile time (no localparam emitted).
+    pub is_external: bool,
 }
 
 /// `external fn name(params) [-> RetTy]`
@@ -264,7 +266,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum Literal {
-    Int(u128),
+    Int(num_bigint::BigUint),
     Bool(bool),
 }
 
@@ -327,7 +329,7 @@ pub struct QueueDecl {
     pub depth: Option<u64>,
     /// Number of initial tokens pre-loaded at reset.
     /// `init = N` in pipe declarations; enables deadlock-free cycles.
-    pub init_tokens: Option<u128>,
+    pub init_tokens: Option<num_bigint::BigUint>,
     /// `external Queue(...)` — no FIFO instantiated, signals become module ports.
     pub is_external: bool,
 }
