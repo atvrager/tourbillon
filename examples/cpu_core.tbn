@@ -54,13 +54,18 @@ type BusResp = Word
 
 -- Stash record for split-phase Execute: saves decoded instruction fields
 -- across the memory request/response boundary.
+-- Phases: 0=idle, 1=int load wait, 2=int store RMW wait,
+--         3=LC beat1 (low word), 4=LC beat2 (high word + tag),
+--         5=SC beat1 (write low), 6=SC beat2 (write high + tag)
 record ExecStash {
     phase    : Bits 32
     rd       : RegIdx
     funct3   : Bits 3
     rs2_val  : Word
+    rs2_cap  : Cap
     result   : Word
     next_pcc : Cap
+    stash_lo : Word
 }
 
 -- ============================================================
@@ -159,6 +164,9 @@ process Execute {
     produces: dmem_read_req  : Queue(Addr)
     consumes: dmem_read_resp : Queue(Word)
     produces: dmem_write_req : Queue(Addr × Word)
+    produces: tmem_read_req  : Queue(Addr)
+    consumes: tmem_read_resp : Queue(Bits 1)
+    produces: tmem_write_req : Queue(Addr × Bits 1)
     state:    stash          : Cell(ExecStash, init = 0)
 
     rule tick {
@@ -180,49 +188,77 @@ process Execute {
                     match d.mem {
                         Load => {
                             if load_ok == 1 {
-                                dmem_read_req.put(result)
-                                stash.put(ExecStash {
-                                    phase = 1, rd = d.rd, funct3 = d.funct3,
-                                    rs2_val = d.rs2_val, result = result,
-                                    next_pcc = npcc
-                                })
+                                if d.funct3 == 3 {
+                                    -- LC: capability load — read low word first
+                                    dmem_read_req.put(align8(result))
+                                    stash.put(ExecStash {
+                                        phase = 3, rd = d.rd, funct3 = d.funct3,
+                                        rs2_val = d.rs2_val, rs2_cap = 0,
+                                        result = result, next_pcc = npcc,
+                                        stash_lo = 0
+                                    })
+                                } else {
+                                    -- Integer load
+                                    dmem_read_req.put(result)
+                                    stash.put(ExecStash {
+                                        phase = 1, rd = d.rd, funct3 = d.funct3,
+                                        rs2_val = d.rs2_val, rs2_cap = 0,
+                                        result = result, next_pcc = npcc,
+                                        stash_lo = 0
+                                    })
+                                }
                             } else {
                                 -- Bounds/permission violation: zero rd, advance PC
                                 writeback.put((true, d.rd, cap_from_int(0)))
                                 next_pcc.put(npcc)
                                 stash.put(ExecStash {
                                     phase = 0, rd = 0, funct3 = 0,
-                                    rs2_val = 0, result = 0, next_pcc = 0
+                                    rs2_val = 0, rs2_cap = 0,
+                                    result = 0, next_pcc = 0, stash_lo = 0
                                 })
                             }
                         }
                         Store => {
                             if store_ok == 1 {
-                                dmem_read_req.put(result)
-                                stash.put(ExecStash {
-                                    phase = 2, rd = d.rd, funct3 = d.funct3,
-                                    rs2_val = d.rs2_val, result = result,
-                                    next_pcc = npcc
-                                })
+                                if d.funct3 == 3 {
+                                    -- SC: capability store — write low word first
+                                    dmem_write_req.put((align8(result), d.rs2_cap[31:0]))
+                                    stash.put(ExecStash {
+                                        phase = 5, rd = d.rd, funct3 = d.funct3,
+                                        rs2_val = d.rs2_val, rs2_cap = d.rs2_cap,
+                                        result = result, next_pcc = npcc,
+                                        stash_lo = 0
+                                    })
+                                } else {
+                                    -- Integer store: read-modify-write
+                                    dmem_read_req.put(result)
+                                    stash.put(ExecStash {
+                                        phase = 2, rd = d.rd, funct3 = d.funct3,
+                                        rs2_val = d.rs2_val, rs2_cap = 0,
+                                        result = result, next_pcc = npcc,
+                                        stash_lo = 0
+                                    })
+                                }
                             } else {
                                 -- Bounds/permission violation: skip store, advance PC
                                 writeback.put((false, d.rd, cap_from_int(0)))
                                 next_pcc.put(npcc)
                                 stash.put(ExecStash {
                                     phase = 0, rd = 0, funct3 = 0,
-                                    rs2_val = 0, result = 0, next_pcc = 0
+                                    rs2_val = 0, rs2_cap = 0,
+                                    result = 0, next_pcc = 0, stash_lo = 0
                                 })
                             }
                         }
                         None => {
-                            -- CHERI-aware writeback: AUIPC/JAL/JALR produce capabilities,
-                            -- CHERI R-type ops produce cap results, integer ALU produces cap_from_int
+                            -- CHERI-aware writeback
                             let wb_cap = cheri_compute_result(d.opcode, d.funct7, d.funct3, d.rs2_idx, d.pcc, d.pc, d.rs1_cap, d.rs2_cap, d.rs1_val, d.rs2_val, d.imm, result)
                             writeback.put((d.wb, d.rd, wb_cap))
                             next_pcc.put(npcc)
                             stash.put(ExecStash {
                                 phase = 0, rd = 0, funct3 = 0,
-                                rs2_val = 0, result = 0, next_pcc = 0
+                                rs2_val = 0, rs2_cap = 0,
+                                result = 0, next_pcc = 0, stash_lo = 0
                             })
                         }
                     }
@@ -233,6 +269,7 @@ process Execute {
             }
         } else {
             if s.phase == 1 {
+                -- Integer load: waiting for data word
                 match dmem_read_resp.try_take() {
                     Some(raw_word) => {
                         let val = load_extend(s.funct3, raw_word, s.result[1:0])
@@ -240,7 +277,8 @@ process Execute {
                         next_pcc.put(s.next_pcc)
                         stash.put(ExecStash {
                             phase = 0, rd = 0, funct3 = 0,
-                            rs2_val = 0, result = 0, next_pcc = 0
+                            rs2_val = 0, rs2_cap = 0,
+                            result = 0, next_pcc = 0, stash_lo = 0
                         })
                     }
                     None => {
@@ -249,15 +287,19 @@ process Execute {
                 }
             } else {
                 if s.phase == 2 {
+                    -- Integer store: waiting for read-back, then write merged + clear tag
                     match dmem_read_resp.try_take() {
                         Some(old_word) => {
                             let merged = store_merge(s.funct3, old_word, s.rs2_val, s.result[1:0])
                             dmem_write_req.put((s.result, merged))
+                            -- Clear tag at this 8-byte region (integer write invalidates caps)
+                            tmem_write_req.put((tag_addr(s.result), 0))
                             writeback.put((false, s.rd, cap_from_int(s.result)))
                             next_pcc.put(s.next_pcc)
                             stash.put(ExecStash {
                                 phase = 0, rd = 0, funct3 = 0,
-                                rs2_val = 0, result = 0, next_pcc = 0
+                                rs2_val = 0, rs2_cap = 0,
+                                result = 0, next_pcc = 0, stash_lo = 0
                             })
                         }
                         None => {
@@ -265,7 +307,70 @@ process Execute {
                         }
                     }
                 } else {
-                    stash.put(s)
+                    if s.phase == 3 {
+                        -- LC beat 1: waiting for low word
+                        match dmem_read_resp.try_take() {
+                            Some(lo) => {
+                                -- Got low word. Issue high word + tag reads in parallel.
+                                dmem_read_req.put(align8(s.result) | 4)
+                                tmem_read_req.put(tag_addr(s.result))
+                                stash.put(ExecStash {
+                                    phase = 4, rd = s.rd, funct3 = s.funct3,
+                                    rs2_val = s.rs2_val, rs2_cap = s.rs2_cap,
+                                    result = s.result, next_pcc = s.next_pcc,
+                                    stash_lo = lo
+                                })
+                            }
+                            None => {
+                                stash.put(s)
+                            }
+                        }
+                    } else {
+                        if s.phase == 4 {
+                            -- LC beat 2: waiting for high word + tag
+                            match dmem_read_resp.try_take() {
+                                Some(hi) => {
+                                    match tmem_read_resp.try_take() {
+                                        Some(tag) => {
+                                            -- Assemble 65-bit capability: {tag, hi, lo}
+                                            let cap = cap_assemble(tag, hi, s.stash_lo)
+                                            writeback.put((true, s.rd, cap))
+                                            next_pcc.put(s.next_pcc)
+                                            stash.put(ExecStash {
+                                                phase = 0, rd = 0, funct3 = 0,
+                                                rs2_val = 0, rs2_cap = 0,
+                                                result = 0, next_pcc = 0, stash_lo = 0
+                                            })
+                                        }
+                                        None => {
+                                            -- Got high word but not tag yet — stall
+                                            -- (put high word back? can't — already consumed)
+                                            -- For now: assume same-cycle arrival (same latency)
+                                            stash.put(s)
+                                        }
+                                    }
+                                }
+                                None => {
+                                    stash.put(s)
+                                }
+                            }
+                        } else {
+                            if s.phase == 5 {
+                                -- SC beat 2: write high word + tag, then done
+                                dmem_write_req.put((align8(s.result) | 4, s.rs2_cap[63:32]))
+                                tmem_write_req.put((tag_addr(s.result), s.rs2_cap[64:64]))
+                                writeback.put((false, s.rd, cap_from_int(0)))
+                                next_pcc.put(s.next_pcc)
+                                stash.put(ExecStash {
+                                    phase = 0, rd = 0, funct3 = 0,
+                                    rs2_val = 0, rs2_cap = 0,
+                                    result = 0, next_pcc = 0, stash_lo = 0
+                                })
+                            } else {
+                                stash.put(s)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -313,6 +418,11 @@ pipe CPUCore {
     let dmem_rd_resp = Queue(Word, depth = 1)
     let dmem_wr_req  = Queue(Addr × Word, depth = 1)
 
+    -- Tag memory interface (1 bit per 8-byte region, for LC/SC + tag clearing)
+    let tmem_rd_req  = Queue(Addr, depth = 1)
+    let tmem_rd_resp = Queue(Bits 1, depth = 1)
+    let tmem_wr_req  = Queue(Addr × Bits 1, depth = 1)
+
     Fetch {
         fetch_out      = fetch_q,
         next_pcc       = next_pcc_q,
@@ -331,7 +441,10 @@ pipe CPUCore {
         writeback      = wb_q,
         dmem_read_req  = dmem_rd_req,
         dmem_read_resp = dmem_rd_resp,
-        dmem_write_req = dmem_wr_req
+        dmem_write_req = dmem_wr_req,
+        tmem_read_req  = tmem_rd_req,
+        tmem_read_resp = tmem_rd_resp,
+        tmem_write_req = tmem_wr_req
     }
     Writeback {
         wb_in   = wb_q

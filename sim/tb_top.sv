@@ -1,8 +1,8 @@
-// tb_top.sv — Simulation top-level wrapper for the Tourbillon CPU
+// tb_top.sv — Simulation top-level wrapper for the Tourbillon RV32IY CPU
 //
 // Wires the generated CPU module (with memory ports) to behavioral
-// mem_model instances for instruction and data memory. Monitors dmem
-// writes to the tohost address (0x80001000) for riscv-tests pass/fail.
+// mem_model instances for instruction memory, data memory, and tag memory.
+// Monitors dmem writes to the tohost address (0x80001000) for riscv-tests pass/fail.
 //
 // CPUCore sub-pipe ports are prefixed with CPUCore_ in the generated SV.
 
@@ -59,6 +59,23 @@ module tb_top (
     wire         dmem_wr_req_ready;
     wire [63:0]  dmem_wr_req_data;
 
+    // tmem (tag memory) read request
+    wire         tmem_rd_req_valid;
+    wire         tmem_rd_req_ready;
+    wire [31:0]  tmem_rd_req_data;
+
+    // tmem read response (1-bit tag from CPU, 32-bit from mem_model)
+    wire         tmem_rd_resp_valid;
+    wire         tmem_rd_resp_ready;
+    wire         tmem_rd_resp_data;       // 1-bit to CPU
+    wire [31:0]  tmem_rd_resp_data_wide;  // 32-bit from mem_model
+    assign tmem_rd_resp_data = tmem_rd_resp_data_wide[0];
+
+    // tmem write request ({addr[32:1], tag[0]})
+    wire         tmem_wr_req_valid;
+    wire         tmem_wr_req_ready;
+    wire [32:0]  tmem_wr_req_data;
+
     // -------------------------------------------------------------------------
     // CPU instance
     // -------------------------------------------------------------------------
@@ -90,7 +107,20 @@ module tb_top (
         // dmem write
         .q_dmem_write_req_enq_valid (dmem_wr_req_valid),
         .q_dmem_write_req_enq_ready (dmem_wr_req_ready),
-        .q_dmem_write_req_enq_data  (dmem_wr_req_data)
+        .q_dmem_write_req_enq_data  (dmem_wr_req_data),
+
+        // tmem read
+        .q_tmem_read_req_enq_valid  (tmem_rd_req_valid),
+        .q_tmem_read_req_enq_ready  (tmem_rd_req_ready),
+        .q_tmem_read_req_enq_data   (tmem_rd_req_data),
+        .q_tmem_read_resp_deq_valid (tmem_rd_resp_valid),
+        .q_tmem_read_resp_deq_ready (tmem_rd_resp_ready),
+        .q_tmem_read_resp_deq_data  (tmem_rd_resp_data),
+
+        // tmem write
+        .q_tmem_write_req_enq_valid (tmem_wr_req_valid),
+        .q_tmem_write_req_enq_ready (tmem_wr_req_ready),
+        .q_tmem_write_req_enq_data  (tmem_wr_req_data)
     );
 
     // -------------------------------------------------------------------------
@@ -131,6 +161,31 @@ module tb_top (
         .wr_req_valid  (dmem_wr_req_valid),
         .wr_req_ready  (dmem_wr_req_ready),
         .wr_req_data   (dmem_wr_req_data)
+    );
+
+    // -------------------------------------------------------------------------
+    // Tag memory (1 bit per 8-byte region, registered response)
+    // -------------------------------------------------------------------------
+    // Tag write data: {addr[32:1], tag[0]}
+    // We split the 33-bit write request into addr and data for mem_model_reg.
+    wire [31:0] tmem_wr_addr = tmem_wr_req_data[32:1];
+    wire [31:0] tmem_wr_data = {31'b0, tmem_wr_req_data[0]};
+
+    mem_model_reg #(
+        .DEPTH   (2048),
+        .MEMFILE ("")
+    ) tmem (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .rd_req_valid  (tmem_rd_req_valid),
+        .rd_req_ready  (tmem_rd_req_ready),
+        .rd_req_data   (tmem_rd_req_data),
+        .rd_resp_valid (tmem_rd_resp_valid),
+        .rd_resp_ready (tmem_rd_resp_ready),
+        .rd_resp_data  (tmem_rd_resp_data_wide),
+        .wr_req_valid  (tmem_wr_req_valid),
+        .wr_req_ready  (tmem_wr_req_ready),
+        .wr_req_data   ({tmem_wr_addr, tmem_wr_data})
     );
 
     // Load memory contents from hex file (both imem and dmem get same image)

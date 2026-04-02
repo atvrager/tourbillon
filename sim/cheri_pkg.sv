@@ -215,6 +215,11 @@ package cheri_pkg;
     return cap_root_at(32'h0);
   endfunction
 
+  // Assemble a 65-bit capability from tag, high word, low word (for LC)
+  function automatic [64:0] cap_assemble(input tag, input [31:0] hi, input [31:0] lo);
+    return {tag, hi, lo};
+  endfunction
+
   // Clear the tag bit (intentionally invalidate)
   function automatic [64:0] cap_clear_tag(input [64:0] cap);
     return {1'b0, cap[63:0]};
@@ -342,6 +347,22 @@ package cheri_pkg;
   localparam [4:0] SCR_MTVEC  = 5'd28;
   localparam [4:0] SCR_MEPC   = 5'd29;
   localparam [4:0] SCR_MTDC   = 5'd30;
+
+  // -----------------------------------------------------------------------
+  // Tag memory addressing
+  // -----------------------------------------------------------------------
+  // One tag bit per 8-byte capability-aligned region.
+  // Tag memory uses mem_model which indexes by addr[AW+1:2].
+  // To get index = byte_addr >> 3, we pass (byte_addr >> 3) << 2.
+
+  function automatic [31:0] tag_addr(input [31:0] byte_addr);
+    return {1'b0, byte_addr[31:3], 2'b00};
+  endfunction
+
+  // 8-byte align an address (for LC/SC)
+  function automatic [31:0] align8(input [31:0] addr);
+    return {addr[31:3], 3'b000};
+  endfunction
 
   // -----------------------------------------------------------------------
   // Memory access size from funct3
