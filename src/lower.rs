@@ -774,7 +774,16 @@ impl<'a> SvEmitter<'a> {
             .collect();
         sorted.sort_by_key(|(name, _)| (*name).clone());
         for (name, value) in sorted {
-            self.line(&format!("localparam {name} = {value};"));
+            let bits = value.bits();
+            if bits > 32 {
+                // Wide constants need explicit width to avoid Verilator's 32-bit default
+                self.line(&format!(
+                    "localparam [{}:0] {name} = {bits}'d{value};",
+                    bits - 1
+                ));
+            } else {
+                self.line(&format!("localparam {name} = {value};"));
+            }
         }
         self.blank();
     }
