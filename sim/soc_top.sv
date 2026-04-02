@@ -164,7 +164,7 @@ module soc_top (
     // The UartTx shift register outputs one bit per cycle on tx_pin.
     // Each bit is held for BAUD_DIV+1 cycles. We sample at the baud rate
     // midpoint and reconstruct bytes.
-    localparam BAUD_DIV = 33;  // 100 MHz / 3 MBaud
+    localparam BAUD_DIV = 108;  // 100 MHz / 921600 baud
 
     // Always accept TX bits from Marie
     assign uart_tx_enq_ready = 1'b1;

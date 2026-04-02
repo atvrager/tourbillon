@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, cheri]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -44,22 +44,6 @@ jobs:
         working-directory: sim
         run: RISCV_CC=riscv64-unknown-elf-gcc bash build_tests.sh
 
-      - name: rv32ui standalone (38 tests)
+      - name: Run all simulation tests
         working-directory: sim
-        run: make riscv-tests RISCV_PREFIX=riscv64-unknown-elf-
-
-      - name: CHERI standalone (6 tests)
-        working-directory: sim
-        run: make cheri-test RISCV_PREFIX=riscv64-unknown-elf-
-
-      - name: rv32ui through SoC (38 tests)
-        working-directory: sim
-        run: make soc-riscv-tests RISCV_PREFIX=riscv64-unknown-elf-
-
-      - name: CHERI through SoC (6 tests)
-        working-directory: sim
-        run: make soc-cheri-test RISCV_PREFIX=riscv64-unknown-elf-
-
-      - name: FPGA RTL lint
-        working-directory: sim
-        run: make rtl-check
+        run: make ci RISCV_PREFIX=riscv64-unknown-elf-

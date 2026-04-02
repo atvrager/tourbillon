@@ -24,8 +24,8 @@
 const MEM_REGION  = 0x8
 const UART_REGION = 0x1
 
--- Baud rate divisor: 100 MHz / 3 MBaud ≈ 33
-const BAUD_DIV = 33
+-- Baud rate divisor: 100 MHz / 921600 baud ≈ 108
+const BAUD_DIV = 108
 
 -- ============================================================
 -- Bus adapter: CPU dmem → BusReq/BusResp

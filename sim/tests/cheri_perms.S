@@ -1,90 +1,73 @@
 # cheri_perms.S — CHERI permission restriction and enforcement tests
-#
-# Tests YPERMC (permission restrict) and load/store enforcement:
-# - Verify full perms from PCC
-# - YPERMC to remove write permission
-# - Store through read-only cap → suppressed (data unchanged)
-# - Load through write-only cap → returns 0
-# - Load through read-permitted cap → succeeds
-#
-# Encodings (R-type: funct7 | rs2 | rs1 | funct3 | rd | 0110011):
-# YPERMR x5,x6:     0x101302B3
-# YPERMC x6,x6,x7:  0x0C732333
-# YADDRW x6,x6,x7:  0x0C731333
+
+.include "tests/rvy.inc"
 
     .section .text
     .globl _start
 _start:
+    j 1f
+    TRAP_HANDLER_SKIP
 
-# =========================================================================
+1:  li x27, 0
+    INSTALL_TRAP 0x80000004
+
 # Test 1: AUIPC gives full perms (RWX = 7)
-# =========================================================================
     li x10, 1
     auipc x6, 0
-    .word 0x101302B3             # YPERMR x5, x6
+    YPERMR 5, 6
     li x8, 7
     bne x5, x8, fail
 
-# =========================================================================
 # Test 2: YPERMC restricts permissions (remove W → R+X = 5)
-# =========================================================================
     li x10, 2
-    li x7, 5                    # mask = R+X (bit pattern 101, no W)
-    .word 0x0C732333             # YPERMC x6, x6, x7
-    .word 0x101302B3             # YPERMR x5, x6
+    li x7, 5                    # mask = R+X (no W)
+    YPERMC 6, 6, 7
+    YPERMR 5, 6
     li x8, 5
     bne x5, x8, fail
 
-# =========================================================================
-# Test 3: Store through read-only cap (no W perm) → suppressed
-# =========================================================================
+# Test 3: Store through read-only cap (no W) → traps
     li x10, 3
-    # Write known value via integer pointer
-    lui x9, 0x80002              # x9 = 0x80002000 (integer, tag=0)
+    lui x9, 0x80002              # x9 = 0x80002000 (integer ptr)
     li x3, 0x42
-    sw x3, 0(x9)                 # store 0x42 at 0x80002000 via integer ptr
-    # Create cap with R+X (no W) pointing to 0x80002000
-    auipc x6, 0                  # fresh PCC-derived cap (tag=1, RWX)
+    sw x3, 0(x9)                 # store 0x42 via integer ptr
+    auipc x6, 0                  # fresh tagged cap (RWX)
     lui x7, 0x80002
-    .word 0x0C731333             # YADDRW x6, x6, x7 → addr = 0x80002000
+    YADDRW 6, 6, 7               # addr = 0x80002000
     li x7, 5                    # mask = R+X (no W)
-    .word 0x0C732333             # YPERMC x6, x6, x7
-    # Attempt store through restricted cap — should be suppressed
+    YPERMC 6, 6, 7
     li x3, 0x99
-    sw x3, 0(x6)                 # should fail (no W perm on tagged cap)
-    # Read back via integer pointer — value should be unchanged
+    sw x3, 0(x6)                 # traps (no W perm)
     lw x3, 0(x9)
     li x8, 0x42
-    bne x3, x8, fail            # should still be 0x42
+    bne x3, x8, fail            # value unchanged
+    li x8, 1
+    bne x27, x8, fail           # 1 trap
 
-# =========================================================================
-# Test 4: Load through write-only cap (no R) → returns 0
-# =========================================================================
+# Test 4: Load through write-only cap (no R) → traps
     li x10, 4
     auipc x6, 0
     lui x7, 0x80002
-    .word 0x0C731333             # YADDRW x6, x6, x7 → addr = 0x80002000
-    li x7, 2                    # mask = W only (no R, no X)
-    .word 0x0C732333             # YPERMC x6, x6, x7
-    li x3, 0x77                 # sentinel (non-zero)
-    lw x3, 0(x6)                # load should return 0 (no R perm)
-    bne x3, x0, fail
+    YADDRW 6, 6, 7
+    li x7, 2                    # mask = W only
+    YPERMC 6, 6, 7
+    li x3, 0x77                 # sentinel
+    lw x3, 0(x6)                # traps (no R perm)
+    li x8, 0x77
+    bne x3, x8, fail            # sentinel preserved
+    li x8, 2
+    bne x27, x8, fail           # 2 traps total
 
-# =========================================================================
-# Test 5: Load through R-permitted cap still works
-# =========================================================================
+# Test 5: Load through R-permitted cap works
     li x10, 5
     auipc x6, 0
     lui x7, 0x80002
-    .word 0x0C731333             # YADDRW x6, x6, x7 → addr = 0x80002000
-    # Keep full perms (PCC-derived: RWX = 7, R is set)
-    lw x3, 0(x6)                # should succeed
-    li x8, 0x42                 # should read 0x42 (stored in test 3)
+    YADDRW 6, 6, 7
+    lw x3, 0(x6)                # R+W+X, succeeds
+    li x8, 0x42
     bne x3, x8, fail
 
-# =========================================================================
 # PASS
-# =========================================================================
     lui x5, 0x80001
     li x6, 1
     sw x6, 0(x5)

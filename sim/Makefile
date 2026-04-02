@@ -30,11 +30,14 @@ SPIV2_SV_DIR  ?= spi_v2_sv_out
 SPIV2_OBJ_DIR := spi_v2_obj_dir
 SPIV2_BIN     := $(SPIV2_OBJ_DIR)/sim_spi_v2
 
-.PHONY: sv verilate build run test-smoke test-hex riscv-tests clean
+.PHONY: ci sv verilate build run test-smoke test-hex riscv-tests clean
 .PHONY: soc-sv soc-build soc-hello soc-riscv-tests soc-cheri-test rtl-check
 .PHONY: rtl-export rtl-export-standalone rtl-export-ext
 .PHONY: spi-sv spi-build spi-test
 .PHONY: spi-v2-sv spi-v2-build spi-v2-test
+
+# Run everything: compiler tests + all simulation targets
+ci: riscv-tests cheri-test soc-hello soc-riscv-tests soc-cheri-test rtl-check
 
 # Generate SystemVerilog from Tourbillon source
 sv:

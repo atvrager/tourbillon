@@ -36,6 +36,22 @@ package cheri_pkg;
   localparam PERM_W = 3'b010;
   localparam PERM_X = 3'b100;
 
+  // CHERI exception cause codes (RISC-V CHERI spec Table 77)
+  localparam [31:0] CAUSE_ILLEGAL_INSN      = 32'd2;
+  localparam [31:0] CAUSE_ECALL_M           = 32'd11;
+  localparam [31:0] CAUSE_CHERI_INSTR_FAULT = 32'd32;
+  localparam [31:0] CAUSE_CHERI_LOAD_FAULT  = 32'd33;
+  localparam [31:0] CAUSE_CHERI_STORE_FAULT = 32'd34;
+
+  // CSR address constants
+  localparam [11:0] CSR_MTVEC  = 12'h305;
+  localparam [11:0] CSR_MEPC   = 12'h341;
+  localparam [11:0] CSR_MCAUSE = 12'h342;
+  localparam [11:0] CSR_MTVAL  = 12'h343;
+
+  // SYSTEM opcode (for Execute dispatch)
+  localparam [6:0] RV_OP_SYSTEM = 7'b1110011;
+
   // Root capability metadata: all permissions, full address space [0, 2^32)
   // SDP=0x3F, AP_M=0x7 (RWX), GL=1, CT=0 (unsealed), EF=0 (inexact)
   // E=24: T_stored={top>>3=32, E[4:3]=2'b11}=10'b0100000011, B_hi=7'b0
@@ -401,6 +417,10 @@ package cheri_pkg;
     if (!cap[64])
       return 1'b1;
 
+    // Sealed capabilities (otype != 0) cannot be dereferenced
+    if (cap[53:50] != 4'b0000)
+      return 1'b0;
+
     // Permission check
     if (is_store) begin
       if ((cap[57:55] & PERM_W) == 3'b0) return 1'b0;
@@ -426,6 +446,10 @@ package cheri_pkg;
   localparam [6:0] CHERI_F7_YBNDS_GRP  = 7'b0000111;  // YBNDSW/YBNDSRW
   localparam [6:0] CHERI_F7_UNARY      = 7'b0001000;  // Unary cap inspection group
   localparam [6:0] CHERI_F7_PACKY      = 7'b0000100;  // PACKY (clear tag)
+
+  // YSEAL / YUNSEAL (seal/unseal capabilities)
+  localparam [6:0] CHERI_F7_YSEAL   = 7'b0001001;
+  localparam [6:0] CHERI_F7_YUNSEAL = 7'b0001010;
 
   // Unary sub-opcodes (encoded in rs2 field, funct7=0001000)
   localparam [4:0] CHERI_UNARY_YTAGR   = 5'b00000;   // Read tag
@@ -516,6 +540,14 @@ package cheri_pkg;
             return cap_from_int(alu_result);
         end
 
+        CHERI_F7_YSEAL: begin
+          return cap_seal(rs1_cap, rs2_cap);   // YSEAL rd, rs1, rs2
+        end
+
+        CHERI_F7_YUNSEAL: begin
+          return cap_unseal(rs1_cap, rs2_cap); // YUNSEAL rd, rs1, rs2
+        end
+
         default: ;  // Fall through to standard integer result
       endcase
     end
@@ -540,6 +572,69 @@ package cheri_pkg;
       return cap_set_addr(rs1_cap, next_pc);  // jump to rs1 capability
     else
       return cap_set_addr(pcc, next_pc);      // PC-relative (branches, JAL)
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Exception / trap helpers
+  // -----------------------------------------------------------------------
+
+  // Compute trap vector entry address from mtvec capability and cause code.
+  // MODE=00 (Direct): all traps go to BASE.
+  // MODE=01 (Vectored): asynchronous interrupts go to BASE + 4*cause.
+  // Synchronous exceptions always use BASE regardless of mode.
+  function automatic [31:0] trap_vector_addr(
+    input [64:0] mtvec_cap, input [31:0] cause
+  );
+    logic [31:0] base;
+    logic [1:0]  mode;
+    base = {mtvec_cap[31:2], 2'b00};  // BASE field (aligned)
+    mode = mtvec_cap[1:0];             // MODE field
+    // For synchronous exceptions, always use direct mode
+    if (mode == 2'b01 && cause[31])    // Vectored only for interrupts (MSB=1)
+      return base + (cause << 2);
+    else
+      return base;
+  endfunction
+
+  // Detect MRET instruction from decoded fields.
+  // MRET = 0x30200073: funct7=0011000, rs2=00010, funct3=000, rs1=00000, rd=00000
+  function automatic is_mret_decoded(
+    input [2:0] funct3, input [6:0] funct7, input [4:0] rs2_idx
+  );
+    return (funct3 == 3'b000) && (funct7 == 7'b0011000) && (rs2_idx == 5'b00010);
+  endfunction
+
+  // Reconstruct CSR address from decoded funct7 and rs2 fields.
+  // CSR address = instruction[31:20] = {funct7, rs2_idx}
+  function automatic [11:0] csr_addr_from_decoded(
+    input [6:0] funct7, input [4:0] rs2_idx
+  );
+    return {funct7, rs2_idx};
+  endfunction
+
+  // Read a CSR value by address.  Peeks are passed as individual arguments
+  // since the Tourbillon record is not visible to SV.
+  function automatic [64:0] csr_read(
+    input [11:0] addr,
+    input [64:0] mtvec, input [64:0] mepc,
+    input [64:0] mcause, input [64:0] mtval
+  );
+    case (addr)
+      CSR_MTVEC:  return mtvec;
+      CSR_MEPC:   return mepc;
+      CSR_MCAUSE: return mcause;
+      CSR_MTVAL:  return mtval;
+      default:    return cap_from_int(32'h0);
+    endcase
+  endfunction
+
+  // Conditional CSR field select: returns new_val if addr matches target,
+  // otherwise returns old_val.  Used to update one CSR in a TrapState record.
+  function automatic [64:0] csr_select(
+    input [11:0] addr, input [11:0] target,
+    input [64:0] new_val, input [64:0] old_val
+  );
+    return (addr == target) ? new_val : old_val;
   endfunction
 
 endpackage

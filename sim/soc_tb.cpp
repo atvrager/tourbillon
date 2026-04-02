@@ -243,7 +243,7 @@ int main(int argc, char **argv) {
             if (th != 0) {
                 if (th == 1) {
                     result = 0;
-                    drain_remaining = 50000;  // max drain budget (UART TX)
+                    drain_remaining = 200000;  // max drain budget (UART TX at 921600 baud)
                 } else {
                     result = 1;
                     fprintf(stderr, "[soc_tb] FAIL: tohost = 0x%08x (test %u) at cpu cycle %lu\n",
@@ -252,10 +252,10 @@ int main(int argc, char **argv) {
             }
         } else if (drain_remaining > 0 && dut->dev_clk) {
             drain_remaining--;
-            // Require TX idle for 2 full byte periods (10 bits × 34 baud ticks × 2)
+            // Require TX idle for 2 full byte periods (10 bits × 109 baud ticks × 2)
             // to distinguish inter-byte gaps from true end-of-transmission.
             if (dut->uart_tx_idle)
-                { if (++idle_count >= 680) drain_remaining = 0; }
+                { if (++idle_count >= 2180) drain_remaining = 0; }
             else
                 idle_count = 0;
         }

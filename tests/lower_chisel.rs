@@ -150,7 +150,7 @@ fn chisel_marie_soc_compiles() {
     assert!(scala.contains("object MemOp {"));
 
     // Constants
-    assert!(scala.contains("val BAUD_DIV = 33.U"));
+    assert!(scala.contains("val BAUD_DIV = 108.U"));
     assert!(scala.contains("val MEM_REGION = 8.U"));
 
     // External queues (UART TX pin, memory ports)
