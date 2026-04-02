@@ -31,6 +31,8 @@ record Decoded {
     rd      : RegIdx
     rs1_val : Word
     rs2_val : Word
+    rs1_cap : Cap
+    rs2_cap : Cap
     imm     : Word
     pc      : Addr
     pcc     : Cap
@@ -38,7 +40,9 @@ record Decoded {
     wb      : Bool
     is_br   : Bool
     funct3  : Bits 3
+    funct7  : Bits 7
     opcode  : Bits 7
+    rs2_idx : RegIdx
 }
 
 record BusReq {
@@ -114,6 +118,8 @@ process Decode {
                     rd      = rd,
                     rs1_val = cap_get_addr(regs[rs1]),
                     rs2_val = cap_get_addr(regs[rs2]),
+                    rs1_cap = regs[rs1],
+                    rs2_cap = regs[rs2],
                     imm     = imm,
                     pc      = pc,
                     pcc     = pcc,
@@ -121,7 +127,9 @@ process Decode {
                     wb      = needs_wb,
                     is_br   = is_br,
                     funct3  = funct3,
-                    opcode  = opcode
+                    funct7  = funct7,
+                    opcode  = opcode,
+                    rs2_idx = rs2
                 })
             }
             None => {
@@ -158,8 +166,8 @@ process Execute {
 
                     -- Compute next PC address: branch target if taken, else pc+4
                     let npc = compute_next_pc(d.opcode, d.funct3, d.rs1_val, d.rs2_val, d.imm, d.pc)
-                    -- Derive next PCC: same capability metadata, new address
-                    let npcc = cap_set_addr(d.pcc, npc)
+                    -- Derive next PCC: from rs1_cap for JALR, from PCC for others
+                    let npcc = cheri_derive_next_pcc(d.opcode, d.pcc, d.rs1_cap, npc)
 
                     match d.mem {
                         Load => {
@@ -179,7 +187,10 @@ process Execute {
                             })
                         }
                         None => {
-                            writeback.put((d.wb, d.rd, cap_from_int(result)))
+                            -- CHERI-aware writeback: AUIPC/JAL/JALR produce capabilities,
+                            -- CHERI R-type ops produce cap results, integer ALU produces cap_from_int
+                            let wb_cap = cheri_compute_result(d.opcode, d.funct7, d.funct3, d.rs2_idx, d.pcc, d.pc, d.rs1_cap, d.rs2_cap, d.rs1_val, d.rs2_val, d.imm, result)
+                            writeback.put((d.wb, d.rd, wb_cap))
                             next_pcc.put(npcc)
                             stash.put(ExecStash {
                                 phase = 0, rd = 0, funct3 = 0,

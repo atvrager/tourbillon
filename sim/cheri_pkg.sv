@@ -311,4 +311,129 @@ package cheri_pkg;
   localparam [4:0] SCR_MEPC   = 5'd29;
   localparam [4:0] SCR_MTDC   = 5'd30;
 
+  // -----------------------------------------------------------------------
+  // RVY instruction encoding constants (opcode OP = 0110011)
+  // -----------------------------------------------------------------------
+
+  // CHERI R-type funct7 values
+  localparam [6:0] CHERI_F7_YADD_GRP   = 7'b0000110;  // YADD/YADDRW/YPERMC
+  localparam [6:0] CHERI_F7_YBNDS_GRP  = 7'b0000111;  // YBNDSW/YBNDSRW
+  localparam [6:0] CHERI_F7_UNARY      = 7'b0001000;  // Unary cap inspection group
+  localparam [6:0] CHERI_F7_PACKY      = 7'b0000100;  // PACKY (clear tag)
+
+  // Unary sub-opcodes (encoded in rs2 field)
+  localparam [4:0] CHERI_UNARY_YTAGR   = 5'b00000;   // Read tag
+  localparam [4:0] CHERI_UNARY_YPERMR  = 5'b00001;   // Read permissions
+  localparam [4:0] CHERI_UNARY_YTYPER  = 5'b00010;   // Read otype
+  localparam [4:0] CHERI_UNARY_YMODER  = 5'b00011;   // Read mode
+  localparam [4:0] CHERI_UNARY_YTOPR   = 5'b00100;   // Read top
+  localparam [4:0] CHERI_UNARY_YBASER  = 5'b00101;   // Read base
+  localparam [4:0] CHERI_UNARY_YLENR   = 5'b00110;   // Read length
+  localparam [4:0] CHERI_UNARY_YAMASK  = 5'b00111;   // Alignment mask
+
+  // Standard RISC-V opcodes (for reference in dispatch)
+  localparam [6:0] RV_OP_R_TYPE = 7'b0110011;
+  localparam [6:0] RV_OP_AUIPC  = 7'b0010111;
+  localparam [6:0] RV_OP_JAL    = 7'b1101111;
+  localparam [6:0] RV_OP_JALR   = 7'b1100111;
+
+  // -----------------------------------------------------------------------
+  // Phase 2: Execute dispatch — compute writeback capability result
+  // -----------------------------------------------------------------------
+  // Called for non-memory instructions. Returns the 65-bit value to write
+  // to the destination register.
+  //
+  // For standard integer ALU: returns cap_from_int(alu_result)
+  // For AUIPC: derives capability from PCC
+  // For JAL/JALR: link capability derived from PCC
+  // For CHERI R-type: appropriate capability operation
+
+  function automatic [64:0] cheri_compute_result(
+    input [6:0]  opcode,
+    input [6:0]  funct7,
+    input [2:0]  funct3,
+    input [4:0]  rs2_idx,     // raw rs2 field (sub-op for unary CHERI)
+    input [64:0] pcc,
+    input [31:0] pc,
+    input [64:0] rs1_cap,
+    input [64:0] rs2_cap,
+    input [31:0] rs1_val,
+    input [31:0] rs2_val,
+    input [31:0] imm,
+    input [31:0] alu_result
+  );
+    // AUIPC: derive capability from PCC with address = pc + imm
+    if (opcode == RV_OP_AUIPC)
+      return cap_set_addr(pcc, alu_result);
+
+    // JAL / JALR: link register = PCC-derived capability at pc+4
+    if (opcode == RV_OP_JAL || opcode == RV_OP_JALR)
+      return cap_set_addr(pcc, pc + 32'd4);
+
+    // CHERI R-type instructions (opcode = OP = 0110011)
+    if (opcode == RV_OP_R_TYPE) begin
+      case (funct7)
+        CHERI_F7_YADD_GRP: begin
+          case (funct3)
+            3'b000:  return cap_inc_offset(rs1_cap, rs2_val);    // YADD
+            3'b001:  return cap_set_addr(rs1_cap, rs2_val);      // YADDRW
+            3'b010:  return cap_and_perm(rs1_cap, rs2_val[2:0]); // YPERMC
+            default: return cap_from_int(alu_result);
+          endcase
+        end
+
+        CHERI_F7_YBNDS_GRP: begin
+          // YBNDSW (funct3=000) and YBNDSRW (funct3=001)
+          return cap_set_bounds(rs1_cap, rs2_val);
+        end
+
+        CHERI_F7_UNARY: begin
+          case (rs2_idx)
+            CHERI_UNARY_YTAGR:  return cap_from_int({31'b0, cap_get_tag(rs1_cap)});
+            CHERI_UNARY_YPERMR: return cap_from_int({29'b0, cap_get_perms(rs1_cap)});
+            CHERI_UNARY_YTYPER: return cap_from_int({28'b0, cap_get_otype(rs1_cap)});
+            CHERI_UNARY_YTOPR:  return cap_from_int(cap_get_top(rs1_cap));
+            CHERI_UNARY_YBASER: return cap_from_int(cap_get_base(rs1_cap));
+            CHERI_UNARY_YLENR:  return cap_from_int(cap_get_length(rs1_cap));
+            CHERI_UNARY_YAMASK: begin
+              // Alignment mask: returns ~((1 << E) - 1) for precision
+              return cap_from_int(32'hFFFFFFFF << cap_decode_e(rs1_cap));
+            end
+            default: return cap_from_int(alu_result);
+          endcase
+        end
+
+        CHERI_F7_PACKY: begin
+          if (funct3 == 3'b011)
+            return cap_clear_tag(rs1_cap);  // PACKY — clear tag
+          else
+            return cap_from_int(alu_result);
+        end
+
+        default: ;  // Fall through to standard integer result
+      endcase
+    end
+
+    // Default: standard integer ALU result (tag=0)
+    return cap_from_int(alu_result);
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Phase 2: Derive next PCC for instruction fetch
+  // -----------------------------------------------------------------------
+  // JALR derives next PCC from rs1 capability (indirect jump).
+  // All other instructions derive from current PCC (PC-relative).
+
+  function automatic [64:0] cheri_derive_next_pcc(
+    input [6:0]  opcode,
+    input [64:0] pcc,
+    input [64:0] rs1_cap,
+    input [31:0] next_pc
+  );
+    if (opcode == RV_OP_JALR)
+      return cap_set_addr(rs1_cap, next_pc);  // jump to rs1 capability
+    else
+      return cap_set_addr(pcc, next_pc);      // PC-relative (branches, JAL)
+  endfunction
+
 endpackage

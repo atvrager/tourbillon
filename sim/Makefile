@@ -295,6 +295,15 @@ CHERI_MABI   = il32pc64
 cheri-toolchain:
 	CHERI_TOOLCHAIN_DIR=$(CHERI_TOOLCHAIN_DIR) bash fetch_cheri_toolchain.sh
 
+# Build and run CHERI instruction tests (hand-assembled, no CHERI toolchain needed)
+tests/cheri_basic.elf: tests/cheri_basic.S
+	$(AS) -march=rv32i -mabi=ilp32 -o tests/cheri_basic.o tests/cheri_basic.S
+	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/cheri_basic.elf tests/cheri_basic.o
+	@rm -f tests/cheri_basic.o
+
+cheri-test: build tests/cheri_basic.elf
+	$(SIM_BIN) tests/cheri_basic.elf
+
 # Check CHERI toolchain is available
 cheri-check:
 	@if [ ! -x "$(CHERI_CC)" ]; then \
