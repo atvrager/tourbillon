@@ -24,8 +24,8 @@ TOOLCHAIN_ARCHIVE="toolchain_coralnpu_v2_cheri.tar.xz"
 # Update this when the toolchain version changes.
 : "${CHERI_TOOLCHAIN_SHA:=TO_BE_SET_AFTER_FIRST_DOWNLOAD}"
 
-# Download URL — set this to your artifact storage
-: "${CHERI_TOOLCHAIN_URL:=}"
+# Download URL
+: "${CHERI_TOOLCHAIN_URL:=https://storage.googleapis.com/shodan-public-artifacts/toolchain_coralnpu_v2_cheri.tar.xz}"
 
 # Marker file: records the verified checksum of the installed toolchain
 STAMP="${CHERI_TOOLCHAIN_DIR}/.toolchain_sha256"
