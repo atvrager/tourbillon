@@ -30,7 +30,7 @@ Named after the legendary Breguet No. 1160 pocket watch — the most ambitious t
        cpu domain              xbar domain             dev domain
   ┌─────────────────┐     ┌────────────────┐     ┌──────────────────┐
   │   CPUCore pipe   │     │                │     │  MemDevice       │
-  │  (RV32I 4-stage) │ CDC │   Xbar 1→4    │ CDC │  UartPhy pipe    │
+  │ (RV32IY purecap) │ CDC │   Xbar 1→4    │ CDC │  UartPhy pipe    │
   │                  ├─────┤  (addr decode) ├─────┤  ManifestDevice  │
   │  imem (local)    │     │                │     │  ClocksDevice    │
   └─────────────────┘     └────────────────┘     └───────┬──────────┘
@@ -68,9 +68,11 @@ Two export modes:
 - `rtl-export` / `rtl-export-standalone` — internal BRAM with hello.hex, just add constraints
 - `rtl-export-ext` — external memory ports, wire your own SRAM controller
 
-## RV32I Reference Core
+## RV32IY CHERI CPU
 
-`examples/rv32i.tbn` — a complete single-issue, 4-stage RV32I pipeline that passes **38/38 rv32ui compliance tests**.
+The CPU is a **purecap CHERI** implementation — every register is a 65-bit capability (32-bit address + 32-bit compressed metadata + 1-bit tag). All memory accesses are mediated by hardware-enforced capabilities with bounds and permission checking. The ISA extension is called **RV32IY** (Y for Tourbillon's CHERI encoding).
+
+`examples/cpu_core.tbn` defines the pipeline, `examples/rv32i.tbn` the standalone wrapper:
 
 ```
 Fetch ──→ Decode ──→ Execute ──→ Writeback
@@ -79,12 +81,27 @@ Fetch ──→ Decode ──→ Execute ──→ Writeback
   └──────────── done_q ←─────────────┘
 ```
 
-```bash
-# Compile to SystemVerilog
-cargo run -- build examples/rv32i.tbn -o output/
+**CHERI features:**
+- 65-bit capability registers (CHERI Concentrate compressed format, `cheri_pkg.sv`)
+- PCC-based instruction fetch — program counter is a capability
+- Bounds and permission checking on every load/store
+- `LC`/`SC` — capability load/store (2-beat, 65-bit with tag memory)
+- Y-extension instructions: `YADD`, `YBNDSW`, `YPERMC`, `YSEAL`/`YUNSEAL`, `YTAGR`/`YPERMR`/`YTOPR`/`YBASER`/`YLENR`
+- CSR instructions for `mtvec`/`mepc`/`mcause`/`mtval` (capability-width)
+- Exception architecture: CHERI violations (bounds, permissions, sealed) trap with cause codes
 
+**Compliance:** 38/38 rv32ui tests pass, plus 6 CHERI-specific test suites (basic, bounds, capmem, inspect, perms, bounds_rt).
+
+```bash
 # Run rv32ui compliance (requires verilator + riscv toolchain)
 make -C sim riscv-tests
+
+# Run CHERI instruction tests
+make -C sim cheri-test
+
+# Run everything through the SoC fabric
+make -C sim soc-riscv-tests
+make -C sim soc-cheri-test
 ```
 
 ## Language Features
@@ -148,17 +165,19 @@ tbn clean                       # Remove build cache
 ```
 src/           Rust compiler (parse → desugar → typecheck → elaborate → schedule → lower)
 examples/      Tourbillon source files
-  rv32i.tbn      RV32I reference core
-  marie.tbn      Marie Antoinette SoC (3-domain, UART, bus fabric)
+  cpu_core.tbn   RV32IY CHERI CPU core (shared types + pipeline)
+  rv32i.tbn      Standalone CPU wrapper (single-domain, direct memory)
+  marie.tbn      Marie Antoinette SoC (3-domain, UART, manifest, clocks)
 sim/           Verilator simulation infrastructure
   rv32i_pkg.sv   RV32I decode/ALU/branch support package
+  cheri_pkg.sv   CHERI Concentrate capability functions (synthesizable)
   soc_pkg.sv     Clock frequency constants (single source of truth)
   manifest_pkg.sv  Manifest slot access functions (synthesizable SV)
   mem_model.sv   Behavioral SRAM model
   soc_top.sv     SoC simulation wrapper (UART DPI bridge, multi-rate clocks)
   soc_tb.cpp     3-domain C++ testbench (100/150/50 MHz)
   Makefile       Build system (soc-hello, riscv-tests, soc-manifest-test, rtl-export)
-  tests/         Assembly tests (smoke.hex, hello.S, manifest.S)
+  tests/         Assembly tests (smoke, hello, manifest, cheri_basic, cheri_bounds, ...)
 docs/          Design documents
 rtl/           FPGA synthesis files
   marie_top.sv   Xilinx VU+ toplevel (MMCME4, rst_sync, STANDALONE param)
