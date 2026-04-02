@@ -141,7 +141,8 @@ package cheri_pkg;
       b_mantissa = {cap[38:32], 3'b000};
       base = {addr[31:10], b_mantissa};
     end else begin
-      b_mantissa = {cap[38:32], 3'b000};
+      // EF=0: cap[34:32] stores E[2:0], not base bits — mask them out
+      b_mantissa = {cap[38:35], 6'b000000};
       // Shift mantissa left by E, fill upper bits from addr
       base = ((addr >> (e + 5'd10)) << (e + 5'd10)) | ({22'b0, b_mantissa} << e);
     end
@@ -167,7 +168,8 @@ package cheri_pkg;
       carry = (t_mantissa < b_mantissa) ? 1'b1 : 1'b0;
       top = {1'b0, addr[31:10], t_mantissa} + {23'b0, carry, 10'b0};
     end else begin
-      b_mantissa = {cap[38:32], 3'b000};
+      // EF=0: cap[34:32] stores E[2:0], not base bits — mask them out
+      b_mantissa = {cap[38:35], 6'b000000};
       t_mantissa = {cap[48:41], 2'b00};
       carry = (t_mantissa < b_mantissa) ? 1'b1 : 1'b0;
       top = ({1'b0, ((addr >> (e + 5'd10)) << (e + 5'd10))} |

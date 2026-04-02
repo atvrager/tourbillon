@@ -31,7 +31,7 @@ SPIV2_OBJ_DIR := spi_v2_obj_dir
 SPIV2_BIN     := $(SPIV2_OBJ_DIR)/sim_spi_v2
 
 .PHONY: sv verilate build run test-smoke test-hex riscv-tests clean
-.PHONY: soc-sv soc-build soc-hello soc-riscv-tests rtl-check
+.PHONY: soc-sv soc-build soc-hello soc-riscv-tests soc-cheri-test rtl-check
 .PHONY: rtl-export rtl-export-standalone rtl-export-ext
 .PHONY: spi-sv spi-build spi-test
 .PHONY: spi-v2-sv spi-v2-build spi-v2-test
@@ -159,7 +159,8 @@ RTL_DIR := ../rtl
 rtl-check: soc-sv
 	$(VERILATOR) --lint-only -Wall -Wno-fatal \
 		-I$(SOC_SV_DIR) \
-		$(RTL_DIR)/marie_top.sv $(RTL_DIR)/xilinx_stubs.sv rv32i_pkg.sv cheri_pkg.sv \
+		$(RTL_DIR)/marie_top.sv $(RTL_DIR)/fpga_mem.sv $(RTL_DIR)/fpga_tag_mem.sv \
+		$(RTL_DIR)/xilinx_stubs.sv rv32i_pkg.sv cheri_pkg.sv \
 		$(SOC_SV_DIR)/*.sv
 
 # =========================================================================
@@ -186,11 +187,13 @@ rtl-export: rtl-export-standalone
 rtl-export-standalone: soc-sv tests/hello.elf tests/hello.hex
 	@rm -rf $(RTL_EXPORT_DIR) $(RTL_ZIP)
 	@mkdir -p $(RTL_EXPORT_DIR)
-	@cp rv32i_pkg.sv                     $(RTL_EXPORT_DIR)/1_rv32i_pkg.sv
+	@cp rv32i_pkg.sv                     $(RTL_EXPORT_DIR)/1a_rv32i_pkg.sv
+	@cp cheri_pkg.sv                     $(RTL_EXPORT_DIR)/1b_cheri_pkg.sv
 	@cp $(SOC_SV_DIR)/tbn_fifo.sv        $(RTL_EXPORT_DIR)/2_tbn_fifo.sv
 	@cp $(SOC_SV_DIR)/tbn_async_fifo.sv  $(RTL_EXPORT_DIR)/3_tbn_async_fifo.sv
 	@cp $(SOC_SV_DIR)/Marie.sv           $(RTL_EXPORT_DIR)/4_Marie.sv
-	@cp $(RTL_DIR)/fpga_mem.sv           $(RTL_EXPORT_DIR)/5_fpga_mem.sv
+	@cp $(RTL_DIR)/fpga_mem.sv           $(RTL_EXPORT_DIR)/5a_fpga_mem.sv
+	@cp $(RTL_DIR)/fpga_tag_mem.sv       $(RTL_EXPORT_DIR)/5b_fpga_tag_mem.sv
 	@cp $(RTL_DIR)/marie_top.sv          $(RTL_EXPORT_DIR)/6_marie_top.sv
 	@cp tests/hello.hex                  $(RTL_EXPORT_DIR)/hello.hex
 	@printf '// Marie Antoinette SoC — Vivado source file list (topo-sorted)\n' \
@@ -201,8 +204,8 @@ rtl-export-standalone: soc-sv tests/hello.elf tests/hello.hex
 		>> $(RTL_EXPORT_DIR)/filelist.f
 	@printf '// Vivado: set_property generic STANDALONE=1 [current_fileset]\n' \
 		>> $(RTL_EXPORT_DIR)/filelist.f
-	@for f in 1_rv32i_pkg.sv 2_tbn_fifo.sv 3_tbn_async_fifo.sv \
-	          4_Marie.sv 5_fpga_mem.sv 6_marie_top.sv; do \
+	@for f in 1a_rv32i_pkg.sv 1b_cheri_pkg.sv 2_tbn_fifo.sv 3_tbn_async_fifo.sv \
+	          4_Marie.sv 5a_fpga_mem.sv 5b_fpga_tag_mem.sv 6_marie_top.sv; do \
 		echo "$$f" >> $(RTL_EXPORT_DIR)/filelist.f; \
 	done
 	@cd $(RTL_EXPORT_DIR) && zip -q ../$(RTL_ZIP) filelist.f hello.hex *.sv
@@ -213,19 +216,21 @@ rtl-export-standalone: soc-sv tests/hello.elf tests/hello.hex
 rtl-export-ext: soc-sv
 	@rm -rf $(RTL_EXPORT_DIR) $(RTL_ZIP)
 	@mkdir -p $(RTL_EXPORT_DIR)
-	@cp rv32i_pkg.sv                     $(RTL_EXPORT_DIR)/1_rv32i_pkg.sv
+	@cp rv32i_pkg.sv                     $(RTL_EXPORT_DIR)/1a_rv32i_pkg.sv
+	@cp cheri_pkg.sv                     $(RTL_EXPORT_DIR)/1b_cheri_pkg.sv
 	@cp $(SOC_SV_DIR)/tbn_fifo.sv        $(RTL_EXPORT_DIR)/2_tbn_fifo.sv
 	@cp $(SOC_SV_DIR)/tbn_async_fifo.sv  $(RTL_EXPORT_DIR)/3_tbn_async_fifo.sv
 	@cp $(SOC_SV_DIR)/Marie.sv           $(RTL_EXPORT_DIR)/4_Marie.sv
-	@cp $(RTL_DIR)/marie_top.sv          $(RTL_EXPORT_DIR)/5_marie_top.sv
+	@cp $(RTL_DIR)/fpga_tag_mem.sv       $(RTL_EXPORT_DIR)/5a_fpga_tag_mem.sv
+	@cp $(RTL_DIR)/marie_top.sv          $(RTL_EXPORT_DIR)/5b_marie_top.sv
 	@printf '// Marie Antoinette SoC — Vivado source file list (topo-sorted)\n' \
 		> $(RTL_EXPORT_DIR)/filelist.f
 	@printf '// Toplevel: marie_top #(.STANDALONE(0))\n' \
 		>> $(RTL_EXPORT_DIR)/filelist.f
-	@printf '// External memory ports — wire imem/dmem to your SRAM controller.\n' \
+	@printf '// External memory ports — wire imem/dmem/tmem to your controllers.\n' \
 		>> $(RTL_EXPORT_DIR)/filelist.f
-	@for f in 1_rv32i_pkg.sv 2_tbn_fifo.sv 3_tbn_async_fifo.sv \
-	          4_Marie.sv 5_marie_top.sv; do \
+	@for f in 1a_rv32i_pkg.sv 1b_cheri_pkg.sv 2_tbn_fifo.sv 3_tbn_async_fifo.sv \
+	          4_Marie.sv 5a_fpga_tag_mem.sv 5b_marie_top.sv; do \
 		echo "$$f" >> $(RTL_EXPORT_DIR)/filelist.f; \
 	done
 	@cd $(RTL_EXPORT_DIR) && zip -q ../$(RTL_ZIP) filelist.f *.sv
@@ -311,10 +316,39 @@ tests/cheri_capmem.elf: tests/cheri_capmem.S
 	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/cheri_capmem.elf tests/cheri_capmem.o
 	@rm -f tests/cheri_capmem.o
 
-cheri-test: build tests/cheri_basic.elf tests/cheri_bounds.elf tests/cheri_capmem.elf
+tests/cheri_inspect.elf: tests/cheri_inspect.S
+	$(AS) -march=rv32i -mabi=ilp32 -o tests/cheri_inspect.o tests/cheri_inspect.S
+	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/cheri_inspect.elf tests/cheri_inspect.o
+	@rm -f tests/cheri_inspect.o
+
+tests/cheri_perms.elf: tests/cheri_perms.S
+	$(AS) -march=rv32i -mabi=ilp32 -o tests/cheri_perms.o tests/cheri_perms.S
+	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/cheri_perms.elf tests/cheri_perms.o
+	@rm -f tests/cheri_perms.o
+
+tests/cheri_bounds_rt.elf: tests/cheri_bounds_rt.S
+	$(AS) -march=rv32i -mabi=ilp32 -o tests/cheri_bounds_rt.o tests/cheri_bounds_rt.S
+	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/cheri_bounds_rt.elf tests/cheri_bounds_rt.o
+	@rm -f tests/cheri_bounds_rt.o
+
+CHERI_TESTS := tests/cheri_basic.elf tests/cheri_bounds.elf tests/cheri_capmem.elf \
+               tests/cheri_inspect.elf tests/cheri_perms.elf tests/cheri_bounds_rt.elf
+
+cheri-test: build $(CHERI_TESTS)
 	$(SIM_BIN) tests/cheri_basic.elf
 	$(SIM_BIN) tests/cheri_bounds.elf
 	$(SIM_BIN) tests/cheri_capmem.elf
+	$(SIM_BIN) tests/cheri_inspect.elf
+	$(SIM_BIN) tests/cheri_perms.elf
+	$(SIM_BIN) tests/cheri_bounds_rt.elf
+
+soc-cheri-test: soc-build $(CHERI_TESTS)
+	$(SOC_BIN) tests/cheri_basic.elf
+	$(SOC_BIN) tests/cheri_bounds.elf
+	$(SOC_BIN) tests/cheri_capmem.elf
+	$(SOC_BIN) tests/cheri_inspect.elf
+	$(SOC_BIN) tests/cheri_perms.elf
+	$(SOC_BIN) tests/cheri_bounds_rt.elf
 
 # Check CHERI toolchain is available
 cheri-check:

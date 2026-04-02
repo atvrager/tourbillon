@@ -18,13 +18,15 @@
 // Reset: async assert, sync deassert per domain, gated by MMCM locked.
 
 import rv32i_pkg::*;
+import cheri_pkg::*;
 
 module marie_top #(
     parameter STANDALONE  = 0,
     parameter IMEM_FILE   = "hello.hex",
     parameter DMEM_FILE   = "hello.hex",
     parameter IMEM_DEPTH  = 4096,     // 16 KB  (STANDALONE only)
-    parameter DMEM_DEPTH  = 16384     // 64 KB  (STANDALONE only)
+    parameter DMEM_DEPTH  = 16384,    // 64 KB  (STANDALONE only)
+    parameter TMEM_DEPTH  = 8192      // 1 tag per 8 bytes of 64 KB (STANDALONE only)
 )(
     // 100 MHz LVDS differential clock
     input  wire sys_clk_p,
@@ -58,7 +60,18 @@ module marie_top #(
     input  wire [31:0] dmem_rd_resp_data,
     output wire        dmem_wr_req_valid,
     input  wire        dmem_wr_req_ready,
-    output wire [63:0] dmem_wr_req_data
+    output wire [63:0] dmem_wr_req_data,
+
+    // Tag memory interfaces (active when STANDALONE = 0; unused when 1)
+    output wire        tmem_rd_req_valid,
+    input  wire        tmem_rd_req_ready,
+    output wire [31:0] tmem_rd_req_data,
+    input  wire        tmem_rd_resp_valid,
+    output wire        tmem_rd_resp_ready,
+    input  wire        tmem_rd_resp_data,      // 1-bit tag
+    output wire        tmem_wr_req_valid,
+    input  wire        tmem_wr_req_ready,
+    output wire [32:0] tmem_wr_req_data
 );
 
     // =========================================================================
@@ -147,6 +160,13 @@ module marie_top #(
     wire        dmem_wr_v,   dmem_wr_r;
     wire [63:0] dmem_wr_d;
 
+    wire        tmem_req_v,  tmem_req_r;
+    wire [31:0] tmem_req_d;
+    wire        tmem_resp_v, tmem_resp_r;
+    wire        tmem_resp_d;               // 1-bit tag
+    wire        tmem_wr_v,   tmem_wr_r;
+    wire [32:0] tmem_wr_d;
+
     generate
         if (STANDALONE) begin : gen_bram
             // ----- Internal BRAMs baked with hex -----
@@ -174,6 +194,18 @@ module marie_top #(
                 .wr_req_data(dmem_wr_d)
             );
 
+            fpga_tag_mem #(
+                .DEPTH(TMEM_DEPTH)
+            ) u_tmem (
+                .clk(cpu_clk), .rst_n(cpu_rst_n),
+                .rd_req_valid(tmem_req_v),   .rd_req_ready(tmem_req_r),
+                .rd_req_data(tmem_req_d),
+                .rd_resp_valid(tmem_resp_v), .rd_resp_ready(tmem_resp_r),
+                .rd_resp_data(tmem_resp_d),
+                .wr_req_valid(tmem_wr_v),    .wr_req_ready(tmem_wr_r),
+                .wr_req_data(tmem_wr_d)
+            );
+
             // External memory ports unused in standalone mode
             assign imem_rd_req_valid = 1'b0;
             assign imem_rd_req_data  = '0;
@@ -185,6 +217,11 @@ module marie_top #(
             assign dmem_rd_resp_ready = 1'b0;
             assign dmem_wr_req_valid = 1'b0;
             assign dmem_wr_req_data  = '0;
+            assign tmem_rd_req_valid  = 1'b0;
+            assign tmem_rd_req_data   = '0;
+            assign tmem_rd_resp_ready = 1'b0;
+            assign tmem_wr_req_valid  = 1'b0;
+            assign tmem_wr_req_data   = '0;
         end else begin : gen_ext
             // ----- External memory ports -----
             assign imem_rd_req_valid = imem_req_v;
@@ -206,6 +243,16 @@ module marie_top #(
             assign dmem_wr_req_valid = dmem_wr_v;
             assign dmem_wr_r         = dmem_wr_req_ready;
             assign dmem_wr_req_data  = dmem_wr_d;
+
+            assign tmem_rd_req_valid  = tmem_req_v;
+            assign tmem_req_r         = tmem_rd_req_ready;
+            assign tmem_rd_req_data   = tmem_req_d;
+            assign tmem_resp_v        = tmem_rd_resp_valid;
+            assign tmem_rd_resp_ready = tmem_resp_r;
+            assign tmem_resp_d        = tmem_rd_resp_data;
+            assign tmem_wr_req_valid  = tmem_wr_v;
+            assign tmem_wr_r          = tmem_wr_req_ready;
+            assign tmem_wr_req_data   = tmem_wr_d;
         end
     endgenerate
 
@@ -247,6 +294,17 @@ module marie_top #(
         .q_dev_mem_write_req_enq_valid (dmem_wr_v),
         .q_dev_mem_write_req_enq_ready (dmem_wr_r),
         .q_dev_mem_write_req_enq_data  (dmem_wr_d),
+
+        // Tag memory (cpu domain)
+        .q_cpu_tmem_read_req_enq_valid  (tmem_req_v),
+        .q_cpu_tmem_read_req_enq_ready  (tmem_req_r),
+        .q_cpu_tmem_read_req_enq_data   (tmem_req_d),
+        .q_cpu_tmem_read_resp_deq_valid (tmem_resp_v),
+        .q_cpu_tmem_read_resp_deq_ready (tmem_resp_r),
+        .q_cpu_tmem_read_resp_deq_data  (tmem_resp_d),
+        .q_cpu_tmem_write_req_enq_valid (tmem_wr_v),
+        .q_cpu_tmem_write_req_enq_ready (tmem_wr_r),
+        .q_cpu_tmem_write_req_enq_data  (tmem_wr_d),
 
         // UART
         .q_UartPhy_tx_pin_enq_valid (uart_tx_enq_valid),

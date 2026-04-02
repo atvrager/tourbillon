@@ -304,13 +304,22 @@ module soc_top (
     wire [31:0] tmem_wr_addr = tmem_wr_req_data[32:1];
     wire [31:0] tmem_wr_data = {31'b0, tmem_wr_req_data[0]};
 
-    // Stub tag memory: always ready, tag reads return 0.
-    // Integer-only rv32ui tests never use LC/SC, so tag value is don't-care.
-    // Real tag storage can be added once LC/SC flows through the SoC bus.
-    assign tmem_rd_req_ready  = 1'b1;
-    assign tmem_rd_resp_valid = 1'b1;
-    assign tmem_rd_resp_data_wide = 32'b0;
-    assign tmem_wr_req_ready  = 1'b1;
+    mem_model_reg #(
+        .DEPTH   (2048),
+        .MEMFILE ("")
+    ) tmem (
+        .clk           (cpu_clk),
+        .rst_n         (cpu_rst_n),
+        .rd_req_valid  (tmem_rd_req_valid),
+        .rd_req_ready  (tmem_rd_req_ready),
+        .rd_req_data   (tmem_rd_req_data),
+        .rd_resp_valid (tmem_rd_resp_valid),
+        .rd_resp_ready (tmem_rd_resp_ready),
+        .rd_resp_data  (tmem_rd_resp_data_wide),
+        .wr_req_valid  (tmem_wr_req_valid),
+        .wr_req_ready  (tmem_wr_req_ready),
+        .wr_req_data   ({tmem_wr_addr, tmem_wr_data})
+    );
 
     // -------------------------------------------------------------------------
     // Memory loading via +memfile= plusarg (hex files)
