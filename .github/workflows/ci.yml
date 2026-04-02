@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main, cheri]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
+
+  sim:
+    name: Verilator simulation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Verilator and RISC-V toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq verilator gcc-riscv64-unknown-elf
+
+      - name: Build tbn compiler
+        run: cargo build
+
+      - name: Build rv32ui tests from riscv-tests submodule
+        working-directory: sim
+        run: RISCV_CC=riscv64-unknown-elf-gcc bash build_tests.sh
+
+      - name: rv32ui standalone (38 tests)
+        working-directory: sim
+        run: make riscv-tests RISCV_PREFIX=riscv64-unknown-elf-
+
+      - name: CHERI standalone (6 tests)
+        working-directory: sim
+        run: make cheri-test RISCV_PREFIX=riscv64-unknown-elf-
+
+      - name: rv32ui through SoC (38 tests)
+        working-directory: sim
+        run: make soc-riscv-tests RISCV_PREFIX=riscv64-unknown-elf-
+
+      - name: CHERI through SoC (6 tests)
+        working-directory: sim
+        run: make soc-cheri-test RISCV_PREFIX=riscv64-unknown-elf-
+
+      - name: FPGA RTL lint
+        working-directory: sim
+        run: make rtl-check

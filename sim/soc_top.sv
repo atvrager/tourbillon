@@ -10,6 +10,7 @@
 
 /* verilator lint_off IMPORTSTAR */
 import rv32i_pkg::*;
+import cheri_pkg::*;
 
 /* verilator lint_off UNOPTFLAT */
 /* verilator lint_off UNUSEDSIGNAL */
@@ -21,7 +22,8 @@ module soc_top (
     input  wire         xbar_rst_n,
     input  wire         dev_clk,
     input  wire         dev_rst_n,
-    output logic [31:0] tohost
+    output logic [31:0] tohost,
+    output wire         uart_tx_idle   // 1 when TX deserializer is quiescent
 );
 
     // -------------------------------------------------------------------------
@@ -72,6 +74,21 @@ module soc_top (
     wire         uart_cts_deq_data;   // CTS input to Marie
 
     // -------------------------------------------------------------------------
+    // Tag memory interconnect (cpu domain)
+    // -------------------------------------------------------------------------
+    wire         tmem_rd_req_valid;
+    wire         tmem_rd_req_ready;
+    wire [31:0]  tmem_rd_req_data;
+    wire         tmem_rd_resp_valid;
+    wire         tmem_rd_resp_ready;
+    wire         tmem_rd_resp_data;       // 1-bit to Marie
+    wire [31:0]  tmem_rd_resp_data_wide;  // 32-bit from mem_model
+    assign tmem_rd_resp_data = tmem_rd_resp_data_wide[0];
+    wire         tmem_wr_req_valid;
+    wire         tmem_wr_req_ready;
+    wire [32:0]  tmem_wr_req_data;
+
+    // -------------------------------------------------------------------------
     // Marie SoC instance
     // -------------------------------------------------------------------------
     Marie marie_inst (
@@ -97,6 +114,17 @@ module soc_top (
         .q_CPUCore_imem_write_req_enq_valid (imem_wr_req_valid),
         .q_CPUCore_imem_write_req_enq_ready (imem_wr_req_ready),
         .q_CPUCore_imem_write_req_enq_data  (imem_wr_req_data),
+
+        // Tag memory (cpu domain)
+        .q_cpu_tmem_read_req_enq_valid  (tmem_rd_req_valid),
+        .q_cpu_tmem_read_req_enq_ready  (tmem_rd_req_ready),
+        .q_cpu_tmem_read_req_enq_data   (tmem_rd_req_data),
+        .q_cpu_tmem_read_resp_deq_valid (tmem_rd_resp_valid),
+        .q_cpu_tmem_read_resp_deq_ready (tmem_rd_resp_ready),
+        .q_cpu_tmem_read_resp_deq_data  (tmem_rd_resp_data),
+        .q_cpu_tmem_write_req_enq_valid (tmem_wr_req_valid),
+        .q_cpu_tmem_write_req_enq_ready (tmem_wr_req_ready),
+        .q_cpu_tmem_write_req_enq_data  (tmem_wr_req_data),
 
         // Device data memory (dev domain)
         .q_dev_mem_read_req_enq_valid  (dmem_rd_req_valid),
@@ -187,6 +215,9 @@ module soc_top (
         end
     end
 
+    // TX idle when deserializer is in state 0 and line is high (no start bit)
+    assign uart_tx_idle = (tx_bcnt == 4'd0) && (!uart_tx_enq_valid || uart_tx_enq_data);
+
     // -------------------------------------------------------------------------
     // UART RX stub — idle line (always high, always valid)
     // -------------------------------------------------------------------------
@@ -270,6 +301,29 @@ module soc_top (
             end
         end
     end
+
+    // -------------------------------------------------------------------------
+    // Tag memory — cpu domain clock (1 bit per 8-byte region)
+    // -------------------------------------------------------------------------
+    wire [31:0] tmem_wr_addr = tmem_wr_req_data[32:1];
+    wire [31:0] tmem_wr_data = {31'b0, tmem_wr_req_data[0]};
+
+    mem_model_reg #(
+        .DEPTH   (2048),
+        .MEMFILE ("")
+    ) tmem (
+        .clk           (cpu_clk),
+        .rst_n         (cpu_rst_n),
+        .rd_req_valid  (tmem_rd_req_valid),
+        .rd_req_ready  (tmem_rd_req_ready),
+        .rd_req_data   (tmem_rd_req_data),
+        .rd_resp_valid (tmem_rd_resp_valid),
+        .rd_resp_ready (tmem_rd_resp_ready),
+        .rd_resp_data  (tmem_rd_resp_data_wide),
+        .wr_req_valid  (tmem_wr_req_valid),
+        .wr_req_ready  (tmem_wr_req_ready),
+        .wr_req_data   ({tmem_wr_addr, tmem_wr_data})
+    );
 
     // -------------------------------------------------------------------------
     // Memory loading via +memfile= plusarg (hex files)

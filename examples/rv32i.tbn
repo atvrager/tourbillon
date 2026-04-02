@@ -1,7 +1,7 @@
 -- ============================================================
--- RV32I Standalone CPU
+-- RV32IY Standalone CPU
 -- ============================================================
--- Instantiates the shared CPUCore with a local data memory.
+-- Instantiates the shared CPUCore with local data + tag memory.
 -- No CDC, no bus fabric — direct wiring for simulation.
 --
 -- Requires: cpu_core.tbn (types + CPUCore pipe)
@@ -12,13 +12,19 @@
 -- ============================================================
 
 pipe CPU {
-    -- Data memory (local)
+    -- Data memory (local, 16KB = 4096 × 32-bit words)
     let dmem = Memory(Addr → Word, depth = 4096, latency = 1)
 
-    -- CPU core: imem internal, dmem wired to local Memory
+    -- Tag memory (1 bit per 8-byte region = 2048 entries for 16KB)
+    let tmem = Memory(Addr → Bits 1, depth = 2048, latency = 1)
+
+    -- CPU core: imem internal, dmem + tmem wired to local Memory
     CPUCore {
         dmem_rd_req  = dmem_read_req,
         dmem_rd_resp = dmem_read_resp,
-        dmem_wr_req  = dmem_write_req
+        dmem_wr_req  = dmem_write_req,
+        tmem_rd_req  = tmem_read_req,
+        tmem_rd_resp = tmem_read_resp,
+        tmem_wr_req  = tmem_write_req
     }
 }

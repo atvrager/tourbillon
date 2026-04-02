@@ -37,7 +37,7 @@ pub enum Token<'src> {
 
     // Literals / identifiers
     Ident(&'src str),
-    Int(u64),
+    Int(u128),
 
     // Operators
     Plus,

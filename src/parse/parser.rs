@@ -28,7 +28,7 @@ where
                 just(Token::Comma)
                     .ignore_then(just(Token::Depth))
                     .ignore_then(just(Token::Assign))
-                    .ignore_then(select! { Token::Int(n) => n })
+                    .ignore_then(select! { Token::Int(n) => n as u64 })
                     .or_not(),
             )
             .then_ignore(just(Token::RParen))
@@ -44,7 +44,7 @@ where
                 just(Token::Comma)
                     .ignore_then(just(Token::Depth))
                     .ignore_then(just(Token::Assign))
-                    .ignore_then(select! { Token::Int(n) => n })
+                    .ignore_then(select! { Token::Int(n) => n as u64 })
                     .or_not(),
             )
             .then_ignore(just(Token::RParen))
@@ -89,7 +89,7 @@ where
             });
 
         let named_with_int = select! { Token::Ident(s) => s }
-            .then(select! { Token::Int(n) => n }.map_with(|n, e| {
+            .then(select! { Token::Int(n) => n as u64 }.map_with(|n, e| {
                 spn(
                     TypeExpr::Named {
                         name: format!("{n}"),
@@ -109,7 +109,7 @@ where
         });
 
         // Integer literals as type expressions (e.g. 32 in Array(32, Word))
-        let int_as_type = select! { Token::Int(n) => n }.map(|n| TypeExpr::Named {
+        let int_as_type = select! { Token::Int(n) => n as u64 }.map(|n| TypeExpr::Named {
             name: format!("{n}"),
             args: vec![],
         });
@@ -347,9 +347,9 @@ where
 
         // Bit slice: [int : int]
         let bit_slice_postfix = just(Token::LBrack)
-            .ignore_then(select! { Token::Int(hi) => hi })
+            .ignore_then(select! { Token::Int(hi) => hi as u64 })
             .then_ignore(just(Token::Colon))
-            .then(select! { Token::Int(lo) => lo })
+            .then(select! { Token::Int(lo) => lo as u64 })
             .then_ignore(just(Token::RBrack));
 
         let index_postfix = expr
@@ -632,7 +632,7 @@ where
         .then_ignore(just(Token::Colon))
         .then(select! { Token::Ident(s) => s }.map_with(|s: &str, e| spn(s.to_string(), e.span())))
         .then(
-            select! { Token::Int(n) => n }
+            select! { Token::Int(n) => n as u64 }
                 .delimited_by(just(Token::LBrack), just(Token::RBrack))
                 .or_not(),
         )
@@ -729,7 +729,7 @@ where
             just(Token::Comma)
                 .ignore_then(just(Token::Depth))
                 .ignore_then(just(Token::Assign))
-                .ignore_then(select! { Token::Int(n) => n })
+                .ignore_then(select! { Token::Int(n) => n as u64 })
                 .or_not(),
         )
         .then(
@@ -761,13 +761,13 @@ where
             just(Token::Comma)
                 .ignore_then(just(Token::Depth))
                 .ignore_then(just(Token::Assign))
-                .ignore_then(select! { Token::Int(n) => n }),
+                .ignore_then(select! { Token::Int(n) => n as u64 }),
         )
         .then(
             just(Token::Comma)
                 .ignore_then(just(Token::Latency))
                 .ignore_then(just(Token::Assign))
-                .ignore_then(select! { Token::Int(n) => n }),
+                .ignore_then(select! { Token::Int(n) => n as u64 }),
         )
         .then_ignore(just(Token::RParen))
         .map(|((((name, key_ty), val_ty), depth), latency)| MemoryDecl {
@@ -789,7 +789,7 @@ where
             just(Token::Comma)
                 .ignore_then(just(Token::Depth))
                 .ignore_then(just(Token::Assign))
-                .ignore_then(select! { Token::Int(n) => n })
+                .ignore_then(select! { Token::Int(n) => n as u64 })
                 .or_not(),
         )
         .then_ignore(just(Token::RParen))
@@ -974,7 +974,7 @@ where
     let const_def = just(Token::Const)
         .ignore_then(ident_sp)
         .then_ignore(just(Token::Assign))
-        .then(select! { Token::Int(n) => n })
+        .then(select! { Token::Int(n) => n as u64 })
         .map(|(name, value)| Item::Const(ConstDef { name, value }));
 
     // external fn name(params) [-> RetTy]

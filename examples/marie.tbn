@@ -420,11 +420,18 @@ pipe Marie {
     -- Device memory (dev domain)
     let dev_mem = Memory(Addr → Word, depth = 16384, latency = 1)
 
+    -- Tag memory (cpu domain, fast path — no CDC needed for single-CPU SoC)
+    -- 1 tag bit per 8-byte capability-aligned region (64KB / 8 = 8192 entries)
+    let cpu_tmem = Memory(Addr → Bits 1, depth = 8192, latency = 1)
+
     -- CPU core (with dmem exposed as ports, imem internal)
     CPUCore [cpu] {
         dmem_rd_req  = adapter_rd_req,
         dmem_rd_resp = adapter_rd_resp,
-        dmem_wr_req  = adapter_wr_req
+        dmem_wr_req  = adapter_wr_req,
+        tmem_rd_req  = cpu_tmem_read_req,
+        tmem_rd_resp = cpu_tmem_read_resp,
+        tmem_wr_req  = cpu_tmem_write_req
     }
 
     -- CPU dmem adapter (cpu domain)

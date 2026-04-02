@@ -216,8 +216,12 @@ fn width_decl(width: u64) -> String {
 /// Wrap an SV expression in a width cast `W'(expr)` to match the target width.
 /// Avoids redundant casts for plain literals and already-matching widths.
 fn width_cast(expr: &str, target_width: u64) -> String {
-    if target_width <= 1 {
+    if target_width == 0 {
         expr.to_string()
+    } else if target_width == 1 {
+        // For 1-bit values, emit 1'(expr) — needed for SV concatenation
+        // contexts where unsized literals default to 32 bits.
+        format!("1'({expr})")
     } else {
         format!("{target_width}'({expr})")
     }
@@ -1008,9 +1012,11 @@ impl<'a> SvEmitter<'a> {
                     self.clock_for_instance(&self.net.network.graph[src_node].instance_name);
                 let rd_clk =
                     self.clock_for_instance(&self.net.network.graph[dst_node].instance_name);
-                // Use system reset for both sides to keep pointers synchronized
-                let wr_rst = "rst_n".to_string();
-                let rd_rst = "rst_n".to_string();
+                // Use domain-specific resets for each side
+                let wr_rst =
+                    self.reset_for_instance(&self.net.network.graph[src_node].instance_name);
+                let rd_rst =
+                    self.reset_for_instance(&self.net.network.graph[dst_node].instance_name);
 
                 self.line(&format!(
                     "tbn_async_fifo #(.WIDTH({w}), .DEPTH({})) aq_{sname}_inst (",
@@ -1460,6 +1466,30 @@ impl<'a> SvEmitter<'a> {
                 } = &value.node
                 {
                     self.emit_array_update(&base.node, &index.node, &upd_val.node, ctx)
+                } else if let Expr::Tuple(items) = &value.node {
+                    // Emit tuple with per-element width casting from the queue's
+                    // element type. This ensures SV concatenation {a, b} uses
+                    // correct widths even when expressions infer differently
+                    // (e.g., literal 0 infers as 32-bit but should be 1-bit).
+                    if let Some(&edge_idx) = ctx.port_edges.get(&target.node) {
+                        let elem_ty = &self.net.network.graph[edge_idx].elem_ty;
+                        if let Ty::Tuple(component_tys) = elem_ty {
+                            let parts: Vec<String> = items
+                                .iter()
+                                .zip(component_tys.iter())
+                                .map(|(item, expected_ty)| {
+                                    let sv = self.emit_expr(&item.node, ctx);
+                                    let w = bit_width(expected_ty);
+                                    if w > 0 { width_cast(&sv, w) } else { sv }
+                                })
+                                .collect();
+                            format!("{{{}}}", parts.join(", "))
+                        } else {
+                            self.emit_expr(&value.node, ctx)
+                        }
+                    } else {
+                        self.emit_expr(&value.node, ctx)
+                    }
                 } else {
                     self.emit_expr(&value.node, ctx)
                 };
@@ -1648,7 +1678,15 @@ impl<'a> SvEmitter<'a> {
             Expr::Tuple(items) => {
                 let parts: Vec<String> = items
                     .iter()
-                    .map(|item| self.emit_expr(&item.node, ctx))
+                    .map(|item| {
+                        let sv = self.emit_expr(&item.node, ctx);
+                        let ty = self.infer_expr_type(&item.node, ctx);
+                        let w = bit_width(&ty);
+                        // Width-cast every tuple element so SV concatenation {a, b}
+                        // uses explicit widths. Without this, unsized integer literals
+                        // default to 32 bits which breaks narrow-field tuples.
+                        if w > 0 { width_cast(&sv, w) } else { sv }
+                    })
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
