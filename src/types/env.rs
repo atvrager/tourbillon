@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use num_bigint::BigUint;
+
 use crate::ast::*;
 use crate::diagnostics::Diagnostic;
 
@@ -13,7 +15,9 @@ pub struct TypeEnv {
     /// Variable scope stack (innermost last)
     scopes: Vec<HashMap<String, Ty>>,
     /// Compile-time constants: name → value
-    pub constants: HashMap<String, u64>,
+    pub constants: HashMap<String, BigUint>,
+    /// Constants declared as `extern` — resolved at SV compile time
+    pub external_constants: std::collections::HashSet<String>,
     /// External function signatures: name → (param types, optional return type)
     pub external_fns: HashMap<String, (Vec<Ty>, Option<Ty>)>,
 }
@@ -30,6 +34,7 @@ impl TypeEnv {
             type_defs: HashMap::new(),
             scopes: vec![HashMap::new()],
             constants: HashMap::new(),
+            external_constants: std::collections::HashSet::new(),
             external_fns: HashMap::new(),
         }
     }
@@ -48,7 +53,11 @@ impl TypeEnv {
     pub fn collect_constants(&mut self, source: &SourceFile) {
         for item in &source.items {
             if let Item::Const(cd) = &item.node {
-                self.constants.insert(cd.name.node.clone(), cd.value);
+                self.constants
+                    .insert(cd.name.node.clone(), cd.value.clone());
+                if cd.is_external {
+                    self.external_constants.insert(cd.name.node.clone());
+                }
             }
         }
     }

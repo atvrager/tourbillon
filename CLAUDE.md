@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Tourbillon (`tbn`) is a queue-centric hardware description language implemented in Rust. It compiles `.tbn` source files to synthesisable SystemVerilog. The full language specification lives in `TOURBILLON.md` — read it before making design decisions.
 
-**Status:** Marie Antoinette SoC complete — Hello World prints via physical UART TX pin through 3-clock-domain bus fabric. Phase 0–3 complete. rv32ui compliance: 38/38 tests pass. Compiler features: `const` (localparam), `expr[hi:lo]` (bit slicing), `external fn` (DPI), `external Queue` (module port pins), pipe hierarchy with cross-pipe queue wiring, `tbn wave` (FST trace reader), width-aware SV emission. CDC: AsyncQueue gray-code FIFO, domain annotations, cross-domain validation. Split-phase processes for CDC-tolerant bus fabric. Conditional put/take guard analysis (can_fire only requires unconditional operations). UART: real bit-serial TX/RX/RTS/CTS in Tourbillon (UartTx, UartRx, UartDevice, UartPhy pipe). FPGA: Xilinx VU+ toplevel with MMCME4 clkgen (100/150/50 MHz), rst_sync, standalone BRAM mode. `TOURBILLON.md` is the authoritative specification.
+**Status:** Marie Antoinette SoC complete — Hello World discovers UART via hardware manifest and prints through 3-clock-domain bus fabric. Phase 0–3 complete. rv32ui compliance: 38/38 tests pass. Compiler features: `const` (localparam), `const = external` (SV package identifiers), BigInt arbitrary-precision integer literals, `expr[hi:lo]` (bit slicing), `external fn` (DPI), `external Queue` (module port pins), pipe hierarchy with cross-pipe queue wiring, `tbn wave` (FST trace reader), width-aware SV emission. CDC: AsyncQueue gray-code FIFO, domain annotations, cross-domain validation. Split-phase processes for CDC-tolerant bus fabric. Conditional put/take guard analysis (can_fire only requires unconditional operations). UART: real bit-serial TX/RX/RTS/CTS in Tourbillon (UartTx, UartRx, UartDevice, UartPhy pipe). Bus peripherals: ManifestDevice (hardware device discovery, pre-populated slots, CLAIM/SEAL), ClocksDevice (runtime frequency queries). Xbar 1→4 (memory, UART, manifest, clocks). FPGA: Xilinx VU+ toplevel with MMCME4 clkgen (100/150/50 MHz), rst_sync, standalone BRAM mode. `TOURBILLON.md` is the authoritative specification.
 
 ## Setup
 
@@ -55,7 +55,7 @@ Tourbillon has exactly three constructs:
 - **Multi-producer arbitration** — `priority = [...]` or `arbitration = round_robin` on queues. Desugars to compiler-generated arbiter process.
 - **AsyncQueue(T, depth=N)** — clock domain crossing FIFO. Gray-code async FIFO in SV. Depth must be power of 2. Pipe-level `domain <name> : Clock` declarations, instances annotated with `[domain_name]`. Compiler enforces: sync Queue cannot cross domains, AsyncQueue must cross domains, Cell peek cannot cross domains.
 - **Async sources** — `source = async` annotation for external inputs (interrupts, bus interfaces). Compiler generates synchroniser.
-- **Constants** — `const NAME = value`. Named compile-time integer constants. Emitted as `localparam` in SV, inlined as literal values in expressions.
+- **Constants** — `const NAME = value`. Named compile-time integer constants (BigUint — arbitrary precision). Emitted as `localparam` in SV, inlined as literal values in expressions. `const NAME = external` declares an SV package identifier (no localparam emitted — resolved at SV compile time via package import).
 - **Bit slicing** — `expr[hi:lo]`. Extract bits from a `Bits N` value. Result type is `Bits(hi - lo + 1)`. Parser disambiguates from array index via `[int:int]` look-ahead.
 - **External functions** — `external fn name(params) [-> RetTy]`. DPI function declarations. Emitted as `import "DPI-C"` in SV. Call-site type checking against registered signatures.
 - **External queues** — `let pin = external Queue(Bits 1, depth = 1)`. Queue becomes a module port (no FIFO instantiated). Direction inferred from port bindings. Works through pipe hierarchy. Used for physical pin interfaces (UART TX/RX/RTS/CTS).
@@ -92,6 +92,7 @@ This graph enables deadlock analysis (Petri net / KPN capacity checks), rule con
 | IR graph | `petgraph` 0.7 | 1 |
 | SV emission | `std::fmt::Write` (direct string building) | 1 |
 | Hashing | `blake3` | 1+ |
+| BigInt | `num-bigint` 0.4, `num-traits` 0.2 | 0+ |
 | Build cache | `cacache` | 1+ |
 | FST traces | `fst-reader` 0.15 | debug |
 
@@ -147,9 +148,11 @@ examples/
   branch.tbn         -- Conditional routing
   peek.tbn           -- Cross-instance Cell peek
   priority.tbn       -- Multi-rule priority suppression
-  marie.tbn          -- Marie Antoinette SoC: 3-domain CPU + bus fabric + UART
+  marie.tbn          -- Marie Antoinette SoC: 3-domain CPU + bus fabric + UART + manifest + clocks
 sim/
   rv32i_pkg.sv       -- Hand-written RV32I decode/ALU/branch SV package (compute_result, load_extend, store_merge)
+  soc_pkg.sv         -- Clock frequency constants (single source of truth for sim, FPGA, firmware)
+  manifest_pkg.sv    -- Manifest slot_read/slot_write SV functions (synthesizable)
   mem_model.sv       -- Behavioral SRAM with ready/valid interface (combinational read, verilator public)
   tb_top.sv          -- Verilator simulation top-level: CPU + memory models + tohost monitor
   tb_cpu.cpp         -- Verilator C++ testbench driver with ELF loader and FST trace
@@ -161,7 +164,10 @@ sim/
   build_tests.sh     -- Builds rv32ui tests from riscv-tests submodule with custom env
   tests/smoke.S      -- Minimal RV32I smoke test assembly
   tests/smoke.hex    -- Hand-encoded smoke test (hex, no toolchain needed)
-  tests/hello.S      -- "Hello, World!" SoC test (UART TX at 921600 baud)
+  tests/hello.S      -- "Hello, World!" SoC test (discovers UART via manifest, 921600 baud)
+  tests/manifest.S   -- Manifest + clocks peripheral test (15 tests: header, slots, CLAIM, SEAL, freqs)
+docs/
+  device-manifest-design.md -- Device manifest peripheral design document
 rtl/
   marie_top.sv       -- Xilinx VU+ FPGA toplevel: MMCME4 clkgen, rst_sync, STANDALONE param
   fpga_mem.sv        -- Synthesisable memory: distributed RAM (imem) or block RAM (dmem)

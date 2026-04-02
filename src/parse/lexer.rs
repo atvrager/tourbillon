@@ -1,4 +1,6 @@
 use chumsky::prelude::*;
+use num_bigint::BigUint;
+use num_traits::Num;
 
 use super::token::Token;
 
@@ -15,7 +17,7 @@ pub fn lexer<'src>()
                 .to_slice()
                 .map(|s: &str| {
                     let stripped: String = s.chars().filter(|c| *c != '_').collect();
-                    u128::from_str_radix(&stripped, 16).unwrap_or(0)
+                    BigUint::from_str_radix(&stripped, 16).unwrap_or_default()
                 }),
         );
 
@@ -30,7 +32,7 @@ pub fn lexer<'src>()
             .to_slice()
             .map(|s: &str| {
                 let stripped: String = s.chars().filter(|c| *c != '_').collect();
-                stripped.parse::<u128>().unwrap_or(0)
+                stripped.parse::<BigUint>().unwrap_or_default()
             });
 
         hex.or(dec).map(Token::Int)
@@ -183,10 +185,10 @@ mod tests {
         assert_eq!(
             tokens,
             vec![
-                Token::Int(42),
-                Token::Int(0xFF),
-                Token::Int(0x8000_0000),
-                Token::Int(1000),
+                Token::Int(BigUint::from(42u32)),
+                Token::Int(BigUint::from(0xFFu32)),
+                Token::Int(BigUint::from(0x8000_0000u32)),
+                Token::Int(BigUint::from(1000u32)),
             ]
         );
     }

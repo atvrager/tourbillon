@@ -11,6 +11,8 @@
 /* verilator lint_off IMPORTSTAR */
 import rv32i_pkg::*;
 import cheri_pkg::*;
+import soc_pkg::*;
+import manifest_pkg::*;
 
 /* verilator lint_off UNOPTFLAT */
 /* verilator lint_off UNUSEDSIGNAL */
@@ -164,7 +166,7 @@ module soc_top (
     // The UartTx shift register outputs one bit per cycle on tx_pin.
     // Each bit is held for BAUD_DIV+1 cycles. We sample at the baud rate
     // midpoint and reconstruct bytes.
-    localparam BAUD_DIV = 108;  // 100 MHz / 921600 baud
+    localparam BAUD_DIV = DEV_FREQ_HZ / 921600;  // from soc_pkg
 
     // Always accept TX bits from Marie
     assign uart_tx_enq_ready = 1'b1;

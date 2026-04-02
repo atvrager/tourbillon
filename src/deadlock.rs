@@ -71,7 +71,7 @@ pub fn analyze(scheduled: &ScheduledNetwork) -> Vec<Diagnostic> {
         }
 
         // A1: Token check — sum initial tokens on cycle edges
-        let mut total_tokens: u128 = 0;
+        let mut total_tokens: u64 = 0;
         for &eidx in &cycle_edges {
             let edge = &graph[eidx];
             match &edge.kind {
@@ -80,7 +80,8 @@ pub fn analyze(scheduled: &ScheduledNetwork) -> Vec<Diagnostic> {
                     total_tokens += 1;
                 }
                 QueueEdgeKind::Queue { init_tokens, .. } => {
-                    total_tokens += init_tokens;
+                    use num_traits::ToPrimitive;
+                    total_tokens += init_tokens.to_u64().unwrap_or(1);
                 }
                 _ => {}
             }

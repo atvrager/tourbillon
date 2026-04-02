@@ -8,8 +8,10 @@
 --
 -- Architecture:
 --   CPU (cpu domain) → CpuDmemAdapter → AsyncQueue → Xbar (xbar domain)
---   Xbar → AsyncQueue → MemDevice (dev domain) → Memory
---   Xbar → AsyncQueue → UartDevice (dev domain) → DPI uart_tx
+--   Xbar → AsyncQueue → MemDevice (dev domain) → Memory          [region 0x8]
+--   Xbar → AsyncQueue → UartPhy (dev domain) → DPI uart_tx       [region 0x1]
+--   Xbar → AsyncQueue → ManifestDevice (dev domain) → registers  [region 0x0]
+--   Xbar → AsyncQueue → ClocksDevice (dev domain) → combinational[region 0x2]
 --
 -- imem: Direct Memory in cpu domain (fast path, no CDC)
 -- dmem: Through bus fabric with 6 async FIFOs across 3 clock domains
@@ -21,11 +23,25 @@
 -- SoC-specific constants
 -- ============================================================
 
-const MEM_REGION  = 0x8
-const UART_REGION = 0x1
+const MEM_REGION      = 0x8
+const UART_REGION     = 0x1
+const MANIFEST_REGION = 0x0
+const CLOCKS_REGION   = 0x2
 
--- Baud rate divisor: 100 MHz / 921600 baud ≈ 108
-const BAUD_DIV = 108
+-- Baud rate divisor: DEV_FREQ_HZ / 921600 ≈ 54 (50 MHz dev clock)
+const BAUD_DIV = 54
+
+-- Clock frequencies: resolved from soc_pkg.sv at SV compile time (single source of truth)
+const CPU_FREQ_HZ  = external
+const XBAR_FREQ_HZ = external
+const DEV_FREQ_HZ  = external
+const NUM_CLOCKS   = external
+
+-- Manifest constants
+const MANIFEST_MAGIC   = 0xDE01D100
+const MANIFEST_VERSION = 1
+const MAX_MANIFEST_SLOTS = 4
+const VALID_MAGIC      = 0x564C4944
 
 -- ============================================================
 -- Bus adapter: CPU dmem → BusReq/BusResp
@@ -81,10 +97,11 @@ process CpuDmemAdapter {
 }
 
 -- ============================================================
--- Crossbar: 1 host → 2 devices
+-- Crossbar: 1 host → 4 devices
 -- ============================================================
 
 -- Split-phase Xbar: single rule with try_take for response polling
+-- Phase 0: decode, phases 1-4: wait for dev0/1/2/3 response
 process Xbar {
     consumes: host_req  : Queue(BusReq)
     produces: host_resp : Queue(BusResp)
@@ -92,6 +109,10 @@ process Xbar {
     consumes: dev0_resp : Queue(BusResp)
     produces: dev1_req  : Queue(BusReq)
     consumes: dev1_resp : Queue(BusResp)
+    produces: dev2_req  : Queue(BusReq)
+    consumes: dev2_resp : Queue(BusResp)
+    produces: dev3_req  : Queue(BusReq)
+    consumes: dev3_resp : Queue(BusResp)
     state:    xphase    : Cell(Bits 32, init = 0)
 
     rule tick {
@@ -108,8 +129,18 @@ process Xbar {
                             dev1_req.put(req)
                             xphase.put(2)
                         } else {
-                            host_resp.put(0)
-                            xphase.put(0)
+                            if region == MANIFEST_REGION {
+                                dev2_req.put(req)
+                                xphase.put(3)
+                            } else {
+                                if region == CLOCKS_REGION {
+                                    dev3_req.put(req)
+                                    xphase.put(4)
+                                } else {
+                                    host_resp.put(0)
+                                    xphase.put(0)
+                                }
+                            }
                         }
                     }
                 }
@@ -125,12 +156,32 @@ process Xbar {
                     None => { xphase.put(p) }
                 }
             } else {
-                match dev1_resp.try_take() {
-                    Some(resp) => {
-                        host_resp.put(resp)
-                        xphase.put(0)
+                if p == 2 {
+                    match dev1_resp.try_take() {
+                        Some(resp) => {
+                            host_resp.put(resp)
+                            xphase.put(0)
+                        }
+                        None => { xphase.put(p) }
                     }
-                    None => { xphase.put(p) }
+                } else {
+                    if p == 3 {
+                        match dev2_resp.try_take() {
+                            Some(resp) => {
+                                host_resp.put(resp)
+                                xphase.put(0)
+                            }
+                            None => { xphase.put(p) }
+                        }
+                    } else {
+                        match dev3_resp.try_take() {
+                            Some(resp) => {
+                                host_resp.put(resp)
+                                xphase.put(0)
+                            }
+                            None => { xphase.put(p) }
+                        }
+                    }
                 }
             }
         }
@@ -372,6 +423,239 @@ process UartRx {
 }
 
 -- ============================================================
+-- Clocks device: report clock frequencies (from soc_pkg)
+-- ============================================================
+-- Stateless, pure combinational. Reads return soc_pkg constants.
+-- Address decode: word offset = addr[3:2]
+--   0: CPU_FREQ_HZ   1: XBAR_FREQ_HZ   2: DEV_FREQ_HZ   3: NUM_CLOCKS
+
+process ClocksDevice {
+    consumes: req  : Queue(BusReq)
+    produces: resp : Queue(BusResp)
+
+    rule handle {
+        let r = req.take()
+        let off = r.addr[3:2]
+        if off == 0 {
+            resp.put(CPU_FREQ_HZ)
+        } else {
+            if off == 1 {
+                resp.put(XBAR_FREQ_HZ)
+            } else {
+                if off == 2 {
+                    resp.put(DEV_FREQ_HZ)
+                } else {
+                    resp.put(NUM_CLOCKS)
+                }
+            }
+        }
+    }
+}
+
+-- ============================================================
+-- Device manifest: hardware device discovery peripheral
+-- ============================================================
+-- Pre-populated with 2 slots (memory at region 0x8, UART at region 0x1).
+-- Supports CLAIM (side-effecting read), SEAL (write-once lockout).
+--
+-- SlotData = 7 × 32 = 224 bits packed record:
+--   key_hi, key_lo, base_addr, aperture, irq, flags, valid
+--
+-- Header region (addr[8:8]==0): offsets 0x00-0x1C
+-- Slot region (addr[8:8]==1): slot=addr[6:5], field=addr[4:2]
+--
+-- Uses manifest_pkg::slot_read/slot_write for field access in SV.
+
+record SlotData {
+    key_hi    : Word
+    key_lo    : Word
+    base_addr : Word
+    aperture  : Word
+    irq       : Word
+    flags     : Word
+    valid     : Word
+}
+
+-- Pre-populated slot 0: Memory device (region 0x8 → base 0x80000000)
+-- key=0, base=0x80000000, aperture=0, irq=0xFFFFFFFF, flags=0, valid=VLID
+-- 224-bit value: 00000000_00000000_80000000_00000000_FFFFFFFF_00000000_564C4944
+const SLOT0_INIT = 0x00000000000000008000000000000000FFFFFFFF00000000564C4944
+
+-- Pre-populated slot 1: UART device (region 0x1 → base 0x10000000)
+const SLOT1_INIT = 0x00000000000000001000000000000000FFFFFFFF00000000564C4944
+
+-- slot_read and slot_write are SV package functions from manifest_pkg.
+-- They are called directly (no external fn declaration needed) and resolve
+-- at SV compile time via package import. No DPI — fully synthesizable.
+
+process ManifestDevice {
+    consumes: req       : Queue(BusReq)
+    produces: resp      : Queue(BusResp)
+    state:    sealed    : Cell(Bits 32, init = 0)
+    state:    claim_ctr : Cell(Bits 32, init = 2)
+    state:    populated : Cell(Bits 32, init = 2)
+    state:    slot0     : Cell(Bits 224, init = SLOT0_INIT)
+    state:    slot1     : Cell(Bits 224, init = SLOT1_INIT)
+    state:    slot2     : Cell(Bits 224, init = 0)
+    state:    slot3     : Cell(Bits 224, init = 0)
+
+    rule handle {
+        let r = req.take()
+        let se = sealed.take()
+        let cc = claim_ctr.take()
+        let pop = populated.take()
+        let s0 = slot0.take()
+        let s1 = slot1.take()
+        let s2 = slot2.take()
+        let s3 = slot3.take()
+
+        if r.we {
+            -- Write path: SEAL register or slot field writes
+            if r.addr[8:8] == 0 {
+                -- Header region: only SEAL at offset 0x1C (word 7)
+                if r.addr[4:2] == 7 {
+                    if r.data != 0 {
+                        sealed.put(1)
+                    } else {
+                        sealed.put(se)
+                    }
+                } else {
+                    sealed.put(se)
+                }
+                slot0.put(s0)
+                slot1.put(s1)
+                slot2.put(s2)
+                slot3.put(s3)
+                populated.put(pop)
+            } else {
+                -- Slot writes (only when unsealed)
+                if se == 0 {
+                    let si = r.addr[6:5]
+                    let fi = r.addr[4:2]
+                    if si == 0 {
+                        slot0.put(slot_write(s0, fi, r.data))
+                        slot1.put(s1)
+                        slot2.put(s2)
+                        slot3.put(s3)
+                    } else {
+                        if si == 1 {
+                            slot0.put(s0)
+                            slot1.put(slot_write(s1, fi, r.data))
+                            slot2.put(s2)
+                            slot3.put(s3)
+                        } else {
+                            if si == 2 {
+                                slot0.put(s0)
+                                slot1.put(s1)
+                                slot2.put(slot_write(s2, fi, r.data))
+                                slot3.put(s3)
+                            } else {
+                                slot0.put(s0)
+                                slot1.put(s1)
+                                slot2.put(s2)
+                                slot3.put(slot_write(s3, fi, r.data))
+                            }
+                        }
+                    }
+                    -- Track populated: if writing valid field (6) with magic
+                    if fi == 6 {
+                        if r.data == VALID_MAGIC {
+                            populated.put(pop + 1)
+                        } else {
+                            populated.put(pop)
+                        }
+                    } else {
+                        populated.put(pop)
+                    }
+                } else {
+                    -- Sealed: silently drop slot writes
+                    slot0.put(s0)
+                    slot1.put(s1)
+                    slot2.put(s2)
+                    slot3.put(s3)
+                    populated.put(pop)
+                }
+                sealed.put(se)
+            }
+            claim_ctr.put(cc)
+            resp.put(0)
+        } else {
+            -- Read path
+            if r.addr[8:8] == 0 {
+                -- Header region
+                let off = r.addr[4:2]
+                if off == 0 {
+                    resp.put(MANIFEST_MAGIC)
+                    claim_ctr.put(cc)
+                } else {
+                    if off == 1 {
+                        resp.put(MANIFEST_VERSION)
+                        claim_ctr.put(cc)
+                    } else {
+                        if off == 2 {
+                            resp.put(MAX_MANIFEST_SLOTS)
+                            claim_ctr.put(cc)
+                        } else {
+                            if off == 3 {
+                                resp.put(pop)
+                                claim_ctr.put(cc)
+                            } else {
+                                if off == 4 {
+                                    -- CLAIM: side-effecting read
+                                    if se != 0 {
+                                        resp.put(0xFFFFFFFF)
+                                        claim_ctr.put(cc)
+                                    } else {
+                                        if cc >= MAX_MANIFEST_SLOTS {
+                                            resp.put(0xFFFFFFFF)
+                                            claim_ctr.put(cc)
+                                        } else {
+                                            resp.put(cc)
+                                            claim_ctr.put(cc + 1)
+                                        }
+                                    }
+                                } else {
+                                    if off == 5 {
+                                        resp.put(se)
+                                    } else {
+                                        resp.put(0)
+                                    }
+                                    claim_ctr.put(cc)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                -- Slot region reads
+                let si = r.addr[6:5]
+                let fi = r.addr[4:2]
+                if si == 0 {
+                    resp.put(slot_read(s0, fi))
+                } else {
+                    if si == 1 {
+                        resp.put(slot_read(s1, fi))
+                    } else {
+                        if si == 2 {
+                            resp.put(slot_read(s2, fi))
+                        } else {
+                            resp.put(slot_read(s3, fi))
+                        }
+                    }
+                }
+                claim_ctr.put(cc)
+            }
+            sealed.put(se)
+            populated.put(pop)
+            slot0.put(s0)
+            slot1.put(s1)
+            slot2.put(s2)
+            slot3.put(s3)
+        }
+    }
+}
+
+-- ============================================================
 -- UART PHY pipe: wires device, TX, and RX together
 -- ============================================================
 
@@ -417,6 +701,14 @@ pipe Marie {
     let uart_bus_req  = AsyncQueue(BusReq,  depth = 4)
     let uart_bus_resp = AsyncQueue(BusResp, depth = 4)
 
+    -- Bus fabric queues (xbar → dev boundary, manifest)
+    let mfst_bus_req  = AsyncQueue(BusReq,  depth = 4)
+    let mfst_bus_resp = AsyncQueue(BusResp, depth = 4)
+
+    -- Bus fabric queues (xbar → dev boundary, clocks)
+    let clk_bus_req   = AsyncQueue(BusReq,  depth = 4)
+    let clk_bus_resp  = AsyncQueue(BusResp, depth = 4)
+
     -- Device memory (dev domain)
     let dev_mem = Memory(Addr → Word, depth = 16384, latency = 1)
 
@@ -450,7 +742,11 @@ pipe Marie {
         dev0_req  = mem_bus_req,
         dev0_resp = mem_bus_resp,
         dev1_req  = uart_bus_req,
-        dev1_resp = uart_bus_resp
+        dev1_resp = uart_bus_resp,
+        dev2_req  = mfst_bus_req,
+        dev2_resp = mfst_bus_resp,
+        dev3_req  = clk_bus_req,
+        dev3_resp = clk_bus_resp
     }
 
     -- Memory device (dev domain)
@@ -466,5 +762,17 @@ pipe Marie {
     UartPhy [dev] {
         uart_req  = uart_bus_req,
         uart_resp = uart_bus_resp
+    }
+
+    -- Manifest device (dev domain) — hardware device discovery
+    ManifestDevice [dev] {
+        req  = mfst_bus_req,
+        resp = mfst_bus_resp
+    }
+
+    -- Clocks device (dev domain) — report clock frequencies
+    ClocksDevice [dev] {
+        req  = clk_bus_req,
+        resp = clk_bus_resp
     }
 }

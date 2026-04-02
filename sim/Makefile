@@ -31,13 +31,13 @@ SPIV2_OBJ_DIR := spi_v2_obj_dir
 SPIV2_BIN     := $(SPIV2_OBJ_DIR)/sim_spi_v2
 
 .PHONY: ci sv verilate build run test-smoke test-hex riscv-tests clean
-.PHONY: soc-sv soc-build soc-hello soc-riscv-tests soc-cheri-test rtl-check
+.PHONY: soc-sv soc-build soc-hello soc-riscv-tests soc-cheri-test soc-manifest-test rtl-check
 .PHONY: rtl-export rtl-export-standalone rtl-export-ext
 .PHONY: spi-sv spi-build spi-test
 .PHONY: spi-v2-sv spi-v2-build spi-v2-test
 
 # Run everything: compiler tests + all simulation targets
-ci: riscv-tests cheri-test soc-hello soc-riscv-tests soc-cheri-test rtl-check
+ci: riscv-tests cheri-test soc-hello soc-riscv-tests soc-cheri-test soc-manifest-test rtl-check
 
 # Generate SystemVerilog from Tourbillon source
 sv:
@@ -117,7 +117,7 @@ soc-build: soc-sv
 		--top-module soc_top \
 		-j $(NPROC) \
 		-I$(SOC_SV_DIR) \
-		rv32i_pkg.sv cheri_pkg.sv \
+		rv32i_pkg.sv cheri_pkg.sv soc_pkg.sv manifest_pkg.sv \
 		soc_top.sv mem_model.sv \
 		$(SOC_SV_DIR)/*.sv \
 		soc_tb.cpp \
@@ -164,7 +164,7 @@ RTL_DIR := ../rtl
 rtl-check: soc-sv
 	$(VERILATOR) --lint-only -Wall -Wno-fatal \
 		-I$(SOC_SV_DIR) \
-		rv32i_pkg.sv cheri_pkg.sv \
+		rv32i_pkg.sv cheri_pkg.sv soc_pkg.sv manifest_pkg.sv \
 		$(RTL_DIR)/marie_top.sv $(RTL_DIR)/fpga_mem.sv $(RTL_DIR)/fpga_tag_mem.sv \
 		$(RTL_DIR)/xilinx_stubs.sv \
 		$(SOC_SV_DIR)/*.sv
@@ -195,6 +195,8 @@ rtl-export-standalone: soc-sv tests/hello.elf tests/hello.hex
 	@mkdir -p $(RTL_EXPORT_DIR)
 	@cp rv32i_pkg.sv                     $(RTL_EXPORT_DIR)/1a_rv32i_pkg.sv
 	@cp cheri_pkg.sv                     $(RTL_EXPORT_DIR)/1b_cheri_pkg.sv
+	@cp soc_pkg.sv                       $(RTL_EXPORT_DIR)/1c_soc_pkg.sv
+	@cp manifest_pkg.sv                  $(RTL_EXPORT_DIR)/1d_manifest_pkg.sv
 	@cp $(SOC_SV_DIR)/tbn_fifo.sv        $(RTL_EXPORT_DIR)/2_tbn_fifo.sv
 	@cp $(SOC_SV_DIR)/tbn_async_fifo.sv  $(RTL_EXPORT_DIR)/3_tbn_async_fifo.sv
 	@cp $(SOC_SV_DIR)/Marie.sv           $(RTL_EXPORT_DIR)/4_Marie.sv
@@ -347,6 +349,14 @@ cheri-test: build $(CHERI_TESTS)
 	$(SIM_BIN) tests/cheri_inspect.elf
 	$(SIM_BIN) tests/cheri_perms.elf
 	$(SIM_BIN) tests/cheri_bounds_rt.elf
+
+tests/manifest.elf: tests/manifest.S
+	$(AS) -march=rv32i -mabi=ilp32 -o tests/manifest.o tests/manifest.S
+	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/manifest.elf tests/manifest.o
+	@rm -f tests/manifest.o
+
+soc-manifest-test: soc-build tests/manifest.elf
+	$(SOC_BIN) tests/manifest.elf
 
 soc-cheri-test: soc-build $(CHERI_TESTS)
 	$(SOC_BIN) tests/cheri_basic.elf

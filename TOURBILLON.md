@@ -231,7 +231,17 @@ const MEM_REGION  = 0x8
 const UART_BASE   = 0x1000_0000
 ```
 
-Emitted as `localparam` in generated SystemVerilog. Supports decimal and hexadecimal literals with underscores.
+Emitted as `localparam` in generated SystemVerilog. Supports decimal and hexadecimal literals with underscores. Integer values use arbitrary-precision arithmetic internally (BigUint), so constants of any width are supported (e.g. 224-bit Cell init values).
+
+#### External Constants
+
+Constants whose value lives in an SV package (single source of truth):
+
+```
+const CPU_FREQ_HZ = external
+```
+
+An `external` constant emits the identifier literally in the generated SV — no `localparam` is emitted. The identifier must be resolvable at SV compile time via package import (e.g. `import soc_pkg::*;`). This avoids duplicating values between `.tbn` and `.sv` files.
 
 ### 2.7 Bit Slicing
 

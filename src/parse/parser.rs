@@ -1,4 +1,5 @@
 use chumsky::{input::ValueInput, prelude::*};
+use num_traits::ToPrimitive;
 
 use crate::ast::*;
 
@@ -28,7 +29,7 @@ where
                 just(Token::Comma)
                     .ignore_then(just(Token::Depth))
                     .ignore_then(just(Token::Assign))
-                    .ignore_then(select! { Token::Int(n) => n as u64 })
+                    .ignore_then(select! { Token::Int(n) => n.to_u64().unwrap_or(0) })
                     .or_not(),
             )
             .then_ignore(just(Token::RParen))
@@ -44,7 +45,7 @@ where
                 just(Token::Comma)
                     .ignore_then(just(Token::Depth))
                     .ignore_then(just(Token::Assign))
-                    .ignore_then(select! { Token::Int(n) => n as u64 })
+                    .ignore_then(select! { Token::Int(n) => n.to_u64().unwrap_or(0) })
                     .or_not(),
             )
             .then_ignore(just(Token::RParen))
@@ -89,15 +90,17 @@ where
             });
 
         let named_with_int = select! { Token::Ident(s) => s }
-            .then(select! { Token::Int(n) => n as u64 }.map_with(|n, e| {
-                spn(
-                    TypeExpr::Named {
-                        name: format!("{n}"),
-                        args: vec![],
-                    },
-                    e.span(),
-                )
-            }))
+            .then(
+                select! { Token::Int(n) => n.to_u64().unwrap_or(0) }.map_with(|n, e| {
+                    spn(
+                        TypeExpr::Named {
+                            name: format!("{n}"),
+                            args: vec![],
+                        },
+                        e.span(),
+                    )
+                }),
+            )
             .map(|(name, arg)| TypeExpr::Named {
                 name: name.to_string(),
                 args: vec![arg],
@@ -109,10 +112,11 @@ where
         });
 
         // Integer literals as type expressions (e.g. 32 in Array(32, Word))
-        let int_as_type = select! { Token::Int(n) => n as u64 }.map(|n| TypeExpr::Named {
-            name: format!("{n}"),
-            args: vec![],
-        });
+        let int_as_type =
+            select! { Token::Int(n) => n.to_u64().unwrap_or(0) }.map(|n| TypeExpr::Named {
+                name: format!("{n}"),
+                args: vec![],
+            });
 
         let paren_type = type_expr
             .clone()
@@ -347,9 +351,9 @@ where
 
         // Bit slice: [int : int]
         let bit_slice_postfix = just(Token::LBrack)
-            .ignore_then(select! { Token::Int(hi) => hi as u64 })
+            .ignore_then(select! { Token::Int(hi) => hi.to_u64().unwrap_or(0) })
             .then_ignore(just(Token::Colon))
-            .then(select! { Token::Int(lo) => lo as u64 })
+            .then(select! { Token::Int(lo) => lo.to_u64().unwrap_or(0) })
             .then_ignore(just(Token::RBrack));
 
         let index_postfix = expr
@@ -632,7 +636,7 @@ where
         .then_ignore(just(Token::Colon))
         .then(select! { Token::Ident(s) => s }.map_with(|s: &str, e| spn(s.to_string(), e.span())))
         .then(
-            select! { Token::Int(n) => n as u64 }
+            select! { Token::Int(n) => n.to_u64().unwrap_or(0) }
                 .delimited_by(just(Token::LBrack), just(Token::RBrack))
                 .or_not(),
         )
@@ -729,7 +733,7 @@ where
             just(Token::Comma)
                 .ignore_then(just(Token::Depth))
                 .ignore_then(just(Token::Assign))
-                .ignore_then(select! { Token::Int(n) => n as u64 })
+                .ignore_then(select! { Token::Int(n) => n.to_u64().unwrap_or(0) })
                 .or_not(),
         )
         .then(
@@ -761,13 +765,13 @@ where
             just(Token::Comma)
                 .ignore_then(just(Token::Depth))
                 .ignore_then(just(Token::Assign))
-                .ignore_then(select! { Token::Int(n) => n as u64 }),
+                .ignore_then(select! { Token::Int(n) => n.to_u64().unwrap_or(0) }),
         )
         .then(
             just(Token::Comma)
                 .ignore_then(just(Token::Latency))
                 .ignore_then(just(Token::Assign))
-                .ignore_then(select! { Token::Int(n) => n as u64 }),
+                .ignore_then(select! { Token::Int(n) => n.to_u64().unwrap_or(0) }),
         )
         .then_ignore(just(Token::RParen))
         .map(|((((name, key_ty), val_ty), depth), latency)| MemoryDecl {
@@ -789,7 +793,7 @@ where
             just(Token::Comma)
                 .ignore_then(just(Token::Depth))
                 .ignore_then(just(Token::Assign))
-                .ignore_then(select! { Token::Int(n) => n as u64 })
+                .ignore_then(select! { Token::Int(n) => n.to_u64().unwrap_or(0) })
                 .or_not(),
         )
         .then_ignore(just(Token::RParen))
@@ -970,12 +974,32 @@ where
     let ident_sp =
         select! { Token::Ident(s) => s }.map_with(|s: &str, e| spn(s.to_string(), e.span()));
 
-    // const NAME = <int>
-    let const_def = just(Token::Const)
+    // const NAME = <int> | const NAME = extern
+    let const_extern = just(Token::Const)
         .ignore_then(ident_sp)
         .then_ignore(just(Token::Assign))
-        .then(select! { Token::Int(n) => n as u64 })
-        .map(|(name, value)| Item::Const(ConstDef { name, value }));
+        .then_ignore(just(Token::External))
+        .map(|name| {
+            Item::Const(ConstDef {
+                name,
+                value: num_bigint::BigUint::ZERO,
+                is_external: true,
+            })
+        });
+
+    let const_value = just(Token::Const)
+        .ignore_then(ident_sp)
+        .then_ignore(just(Token::Assign))
+        .then(select! { Token::Int(n) => n })
+        .map(|(name, value)| {
+            Item::Const(ConstDef {
+                name,
+                value,
+                is_external: false,
+            })
+        });
+
+    let const_def = const_extern.or(const_value);
 
     // external fn name(params) [-> RetTy]
     let ext_param = ident_sp

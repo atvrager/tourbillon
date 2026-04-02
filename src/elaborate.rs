@@ -72,15 +72,18 @@ fn parse_dotted_target(target: &str) -> Option<(&str, &str)> {
 }
 
 /// Extract the init literal value from a Cell type expression.
-fn extract_init_value(ty_expr: &TypeExpr) -> Option<u128> {
+fn extract_init_value(ty_expr: &TypeExpr, type_env: &TypeEnv) -> Option<num_bigint::BigUint> {
     if let TypeExpr::Cell {
         init: Some(init_expr),
         ..
     } = ty_expr
     {
         match &init_expr.node {
-            Expr::Lit(Literal::Int(n)) => Some(*n),
-            Expr::Lit(Literal::Bool(b)) => Some(if *b { 1 } else { 0 }),
+            Expr::Lit(Literal::Int(n)) => Some(n.clone()),
+            Expr::Lit(Literal::Bool(b)) => {
+                Some(num_bigint::BigUint::from(if *b { 1u32 } else { 0u32 }))
+            }
+            Expr::Var(name) => type_env.constants.get(name).cloned(),
             _ => None,
         }
     } else {
@@ -394,7 +397,7 @@ fn elaborate_pipe_inner(
             elem_ty,
             depth,
             kind: QueueEdgeKind::Queue {
-                init_tokens: decl.init_tokens.unwrap_or(0),
+                init_tokens: decl.init_tokens.clone().unwrap_or_default(),
                 is_external: decl.is_external,
             },
             span: decl.name.span.clone(),
@@ -498,7 +501,7 @@ fn elaborate_pipe_inner(
                 let elem_ty = port_element_type(&port_ty).unwrap_or(port_ty.clone());
 
                 let self_loop_name = format!("{instance_name}.{}", port_def.name.node);
-                let init = extract_init_value(&port_def.ty.node);
+                let init = extract_init_value(&port_def.ty.node, type_env);
                 let edge = QueueEdge {
                     name: self_loop_name.clone(),
                     elem_ty,
@@ -1150,6 +1153,7 @@ fn elaborate_pipe_inner(
         domains,
         domain_map,
         constants: type_env.constants.clone(),
+        external_constants: type_env.external_constants.clone(),
         external_fns: type_env.external_fns.clone(),
     })
 }
