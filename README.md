@@ -16,7 +16,7 @@ cargo build
 cargo test
 
 # Compile the Marie Antoinette SoC to SystemVerilog
-cargo run -- build examples/marie.tbn -o output/
+cargo run -- build examples/cpu_core.tbn examples/marie.tbn -o output/
 # -> output/Marie.sv, output/tbn_fifo.sv, output/tbn_async_fifo.sv
 ```
 
@@ -29,10 +29,10 @@ Named after the legendary Breguet No. 1160 pocket watch — the most ambitious t
 ```
        cpu domain              xbar domain             dev domain
   ┌─────────────────┐     ┌────────────────┐     ┌──────────────────┐
-  │   CPUCore pipe   │     │                │     │                  │
-  │  (RV32I 4-stage) │ CDC │   Xbar 1→2    │ CDC │  MemDevice       │
-  │                  ├─────┤  (addr decode) ├─────┤  UartPhy pipe    │
-  │  imem (local)    │     │                │     │   TX/RX/RTS/CTS  │
+  │   CPUCore pipe   │     │                │     │  MemDevice       │
+  │  (RV32I 4-stage) │ CDC │   Xbar 1→4    │ CDC │  UartPhy pipe    │
+  │                  ├─────┤  (addr decode) ├─────┤  ManifestDevice  │
+  │  imem (local)    │     │                │     │  ClocksDevice    │
   └─────────────────┘     └────────────────┘     └───────┬──────────┘
                                                          │ external Queue pins
                                                     uart_tx  uart_rx
@@ -40,7 +40,9 @@ Named after the legendary Breguet No. 1160 pocket watch — the most ambitious t
 
 - **3 clock domains** (100/150/50 MHz in FPGA) with gray-code async FIFO CDC
 - **Pipe hierarchy**: CPUCore pipe instantiated inside Marie with cross-pipe queue wiring
-- **Address-decoded crossbar**: `addr[31:28]` routes to memory (0x8xxx) or UART (0x1xxx)
+- **Address-decoded crossbar**: `addr[31:28]` routes to memory (0x8), UART (0x1), manifest (0x0), clocks (0x2)
+- **Hardware device discovery**: ManifestDevice with pre-populated slots, CLAIM counter, SEAL lockout — firmware discovers peripherals via plain loads, no device tree needed
+- **Clock frequency queries**: ClocksDevice returns `soc_pkg.sv` constants at runtime — enables software baud rate computation
 - **Real UART**: UartTx/UartRx/UartDevice written entirely in Tourbillon — bit-serial shift registers at 921600 baud, with CTS flow control. No DPI — physical TX/RX/RTS/CTS pins via `external Queue`
 - **Non-speculative pipeline**: no branch prediction — Execute sends correct next PC after full completion
 - **Split-phase bus fabric**: all processes use `try_take` polling for CDC-tolerant multi-cycle operations
@@ -125,7 +127,8 @@ pipe Top {
 - **Memory(K → V)** — addressable storage, desugars to req/resp queues
 - **AsyncQueue(T, depth=N)** — clock domain crossing FIFO (gray-code)
 - **external Queue** — module port pins (no FIFO, for physical I/O)
-- **const** — compile-time integer constants (→ `localparam`)
+- **const** — compile-time integer constants (→ `localparam`), arbitrary precision (BigUint)
+- **const = external** — SV package identifiers (no localparam — single source of truth)
 - **expr[hi:lo]** — bit slicing with inferred result width
 - **external fn** — DPI function declarations (→ `import "DPI-C"`)
 
@@ -149,11 +152,14 @@ examples/      Tourbillon source files
   marie.tbn      Marie Antoinette SoC (3-domain, UART, bus fabric)
 sim/           Verilator simulation infrastructure
   rv32i_pkg.sv   RV32I decode/ALU/branch support package
+  soc_pkg.sv     Clock frequency constants (single source of truth)
+  manifest_pkg.sv  Manifest slot access functions (synthesizable SV)
   mem_model.sv   Behavioral SRAM model
   soc_top.sv     SoC simulation wrapper (UART DPI bridge, multi-rate clocks)
   soc_tb.cpp     3-domain C++ testbench (100/150/50 MHz)
-  Makefile       Build system (soc-hello, riscv-tests, rtl-export, rtl-check)
-  tests/         Assembly tests (smoke.hex, hello.S)
+  Makefile       Build system (soc-hello, riscv-tests, soc-manifest-test, rtl-export)
+  tests/         Assembly tests (smoke.hex, hello.S, manifest.S)
+docs/          Design documents
 rtl/           FPGA synthesis files
   marie_top.sv   Xilinx VU+ toplevel (MMCME4, rst_sync, STANDALONE param)
   fpga_mem.sv    Synthesisable memory (distributed RAM / block RAM)
