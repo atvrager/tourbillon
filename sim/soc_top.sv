@@ -22,7 +22,8 @@ module soc_top (
     input  wire         xbar_rst_n,
     input  wire         dev_clk,
     input  wire         dev_rst_n,
-    output logic [31:0] tohost
+    output logic [31:0] tohost,
+    output wire         uart_tx_idle   // 1 when TX deserializer is quiescent
 );
 
     // -------------------------------------------------------------------------
@@ -213,6 +214,9 @@ module soc_top (
             end
         end
     end
+
+    // TX idle when deserializer is in state 0 and line is high (no start bit)
+    assign uart_tx_idle = (tx_bcnt == 4'd0) && (!uart_tx_enq_valid || uart_tx_enq_data);
 
     // -------------------------------------------------------------------------
     // UART RX stub — idle line (always high, always valid)

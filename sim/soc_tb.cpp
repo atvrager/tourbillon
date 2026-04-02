@@ -199,6 +199,7 @@ int main(int argc, char **argv) {
     uint64_t cpu_cycles = 0;
     int result = -1;
     uint64_t drain_remaining = 0;
+    unsigned idle_count = 0;             // consecutive dev_clk cycles with TX idle
 
     // Half-period in simulation ticks (1 tick = 1 ns)
     // cpu:  5 ns, xbar: 3.333 ns (use fixed-point ×3), dev: 10 ns
@@ -242,7 +243,7 @@ int main(int argc, char **argv) {
             if (th != 0) {
                 if (th == 1) {
                     result = 0;
-                    drain_remaining = 100000;  // drain UART TX buffer
+                    drain_remaining = 50000;  // max drain budget (UART TX)
                 } else {
                     result = 1;
                     fprintf(stderr, "[soc_tb] FAIL: tohost = 0x%08x (test %u) at cpu cycle %lu\n",
@@ -251,6 +252,12 @@ int main(int argc, char **argv) {
             }
         } else if (drain_remaining > 0 && dut->dev_clk) {
             drain_remaining--;
+            // Require TX idle for 2 full byte periods (10 bits × 34 baud ticks × 2)
+            // to distinguish inter-byte gaps from true end-of-transmission.
+            if (dut->uart_tx_idle)
+                { if (++idle_count >= 680) drain_remaining = 0; }
+            else
+                idle_count = 0;
         }
     }
 
