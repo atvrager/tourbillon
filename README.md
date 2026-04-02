@@ -41,7 +41,7 @@ Named after the legendary Breguet No. 1160 pocket watch — the most ambitious t
 - **3 clock domains** (100/150/50 MHz in FPGA) with gray-code async FIFO CDC
 - **Pipe hierarchy**: CPUCore pipe instantiated inside Marie with cross-pipe queue wiring
 - **Address-decoded crossbar**: `addr[31:28]` routes to memory (0x8xxx) or UART (0x1xxx)
-- **Real UART**: UartTx/UartRx/UartDevice written entirely in Tourbillon — bit-serial shift registers at 3 MBaud, with CTS flow control. No DPI — physical TX/RX/RTS/CTS pins via `external Queue`
+- **Real UART**: UartTx/UartRx/UartDevice written entirely in Tourbillon — bit-serial shift registers at 921600 baud, with CTS flow control. No DPI — physical TX/RX/RTS/CTS pins via `external Queue`
 - **Non-speculative pipeline**: no branch prediction — Execute sends correct next PC after full completion
 - **Split-phase bus fabric**: all processes use `try_take` polling for CDC-tolerant multi-cycle operations
 
@@ -60,7 +60,7 @@ Output: `Hello, World!` printed through 3-domain bus fabric + bit-serial UART.
 make -C sim rtl-export   # → marie_soc_rtl.zip (standalone, hello.hex baked in)
 ```
 
-Unzip into Vivado, set `marie_top` as top (`STANDALONE=1`), add your board XDC, synthesize. UART TX prints "Hello, World!" on first boot at 3 MBaud.
+Unzip into Vivado, set `marie_top` as top (`STANDALONE=1`), add your board XDC, synthesize. UART TX prints "Hello, World!" on first boot at 921600 baud.
 
 Two export modes:
 - `rtl-export` / `rtl-export-standalone` — internal BRAM with hello.hex, just add constraints

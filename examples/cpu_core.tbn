@@ -68,6 +68,15 @@ record ExecStash {
     stash_lo : Word
 }
 
+-- Trap CSR state: mtvec/mepc/mcause/mtval as capability-width Cells.
+-- Combined into one record for single take/put linearity.
+record TrapState {
+    mtvec  : Cap
+    mepc   : Cap
+    mcause : Cap
+    mtval  : Cap
+}
+
 -- ============================================================
 -- CPU pipeline stages
 -- ============================================================
@@ -152,10 +161,9 @@ process Decode {
 -- Integer results are written as null capabilities (tag=0, meta=0, addr=result).
 -- Next PCC is derived from the current instruction's PCC with updated address.
 --
--- Bounds checking: when rs1 has tag=1 (valid capability), loads/stores are
--- checked against the capability's bounds and permissions. On violation,
--- the memory access is suppressed, rd is zeroed (loads) or ignored (stores),
--- and execution continues at the next instruction (soft trap).
+-- Exception handling: CHERI violations (bounds, permissions, sealed) trap to
+-- mtvec with mcause/mepc/mtval set. CSR instructions (CSRRW) read/write
+-- mtvec/mepc/mcause/mtval. MRET restores PCC from mepc.
 
 process Execute {
     consumes: exec_in        : Queue(Decoded)
@@ -168,9 +176,11 @@ process Execute {
     consumes: tmem_read_resp : Queue(Bits 1)
     produces: tmem_write_req : Queue(Addr × Bits 1)
     state:    stash          : Cell(ExecStash, init = 0)
+    state:    trap           : Cell(TrapState, init = 0)
 
     rule tick {
         let s = stash.take()
+        let t = trap.take()
         if s.phase == 0 {
             match exec_in.try_take() {
                 Some(d) => {
@@ -197,6 +207,7 @@ process Execute {
                                         result = result, next_pcc = npcc,
                                         stash_lo = 0
                                     })
+                                    trap.put(t)
                                 } else {
                                     -- Integer load
                                     dmem_read_req.put(result)
@@ -206,15 +217,23 @@ process Execute {
                                         result = result, next_pcc = npcc,
                                         stash_lo = 0
                                     })
+                                    trap.put(t)
                                 }
                             } else {
-                                -- Bounds/permission violation: zero rd, advance PC
-                                writeback.put((true, d.rd, cap_from_int(0)))
-                                next_pcc.put(npcc)
+                                -- CHERI load violation: trap to mtvec
+                                let tvec = trap_vector_addr(t.mtvec, 33)
+                                next_pcc.put(cap_set_addr(t.mtvec, tvec))
+                                writeback.put((false, d.rd, cap_from_int(0)))
                                 stash.put(ExecStash {
                                     phase = 0, rd = 0, funct3 = 0,
                                     rs2_val = 0, rs2_cap = 0,
                                     result = 0, next_pcc = 0, stash_lo = 0
+                                })
+                                trap.put(TrapState {
+                                    mtvec = t.mtvec,
+                                    mepc = cap_set_addr(d.pcc, d.pc),
+                                    mcause = cap_from_int(33),
+                                    mtval = cap_from_int(result)
                                 })
                             }
                         }
@@ -229,6 +248,7 @@ process Execute {
                                         result = result, next_pcc = npcc,
                                         stash_lo = 0
                                     })
+                                    trap.put(t)
                                 } else {
                                     -- Integer store: read-modify-write
                                     dmem_read_req.put(result)
@@ -238,33 +258,111 @@ process Execute {
                                         result = result, next_pcc = npcc,
                                         stash_lo = 0
                                     })
+                                    trap.put(t)
                                 }
                             } else {
-                                -- Bounds/permission violation: skip store, advance PC
+                                -- CHERI store violation: trap to mtvec
+                                let tvec = trap_vector_addr(t.mtvec, 34)
+                                next_pcc.put(cap_set_addr(t.mtvec, tvec))
                                 writeback.put((false, d.rd, cap_from_int(0)))
+                                stash.put(ExecStash {
+                                    phase = 0, rd = 0, funct3 = 0,
+                                    rs2_val = 0, rs2_cap = 0,
+                                    result = 0, next_pcc = 0, stash_lo = 0
+                                })
+                                trap.put(TrapState {
+                                    mtvec = t.mtvec,
+                                    mepc = cap_set_addr(d.pcc, d.pc),
+                                    mcause = cap_from_int(34),
+                                    mtval = cap_from_int(result)
+                                })
+                            }
+                        }
+                        None => {
+                            if d.opcode == 0x73 {
+                                -- SYSTEM opcode: CSR / MRET / ECALL
+                                if d.funct3 == 1 {
+                                    -- CSRRW: read old CSR value, write rs1_cap
+                                    let csr_addr = csr_addr_from_decoded(d.funct7, d.rs2_idx)
+                                    let old_val = csr_read(csr_addr, t.mtvec, t.mepc, t.mcause, t.mtval)
+                                    writeback.put((d.rd != 0, d.rd, old_val))
+                                    next_pcc.put(npcc)
+                                    stash.put(ExecStash {
+                                        phase = 0, rd = 0, funct3 = 0,
+                                        rs2_val = 0, rs2_cap = 0,
+                                        result = 0, next_pcc = 0, stash_lo = 0
+                                    })
+                                    trap.put(TrapState {
+                                        mtvec  = csr_select(csr_addr, 0x305, d.rs1_cap, t.mtvec),
+                                        mepc   = csr_select(csr_addr, 0x341, d.rs1_cap, t.mepc),
+                                        mcause = csr_select(csr_addr, 0x342, d.rs1_cap, t.mcause),
+                                        mtval  = csr_select(csr_addr, 0x343, d.rs1_cap, t.mtval)
+                                    })
+                                } else {
+                                    if d.funct3 == 0 {
+                                        if is_mret_decoded(d.funct3, d.funct7, d.rs2_idx) == 1 {
+                                            -- MRET: restore PCC from mepc
+                                            next_pcc.put(t.mepc)
+                                            writeback.put((false, d.rd, cap_from_int(0)))
+                                            stash.put(ExecStash {
+                                                phase = 0, rd = 0, funct3 = 0,
+                                                rs2_val = 0, rs2_cap = 0,
+                                                result = 0, next_pcc = 0, stash_lo = 0
+                                            })
+                                            trap.put(t)
+                                        } else {
+                                            -- ECALL / EBREAK / unknown: trap as illegal instruction
+                                            let tvec = trap_vector_addr(t.mtvec, 2)
+                                            next_pcc.put(cap_set_addr(t.mtvec, tvec))
+                                            writeback.put((false, d.rd, cap_from_int(0)))
+                                            stash.put(ExecStash {
+                                                phase = 0, rd = 0, funct3 = 0,
+                                                rs2_val = 0, rs2_cap = 0,
+                                                result = 0, next_pcc = 0, stash_lo = 0
+                                            })
+                                            trap.put(TrapState {
+                                                mtvec = t.mtvec,
+                                                mepc = cap_set_addr(d.pcc, d.pc),
+                                                mcause = cap_from_int(2),
+                                                mtval = cap_from_int(0)
+                                            })
+                                        }
+                                    } else {
+                                        -- CSRRS/CSRRC/other funct3: trap as illegal instruction
+                                        let tvec = trap_vector_addr(t.mtvec, 2)
+                                        next_pcc.put(cap_set_addr(t.mtvec, tvec))
+                                        writeback.put((false, d.rd, cap_from_int(0)))
+                                        stash.put(ExecStash {
+                                            phase = 0, rd = 0, funct3 = 0,
+                                            rs2_val = 0, rs2_cap = 0,
+                                            result = 0, next_pcc = 0, stash_lo = 0
+                                        })
+                                        trap.put(TrapState {
+                                            mtvec = t.mtvec,
+                                            mepc = cap_set_addr(d.pcc, d.pc),
+                                            mcause = cap_from_int(2),
+                                            mtval = cap_from_int(0)
+                                        })
+                                    }
+                                }
+                            } else {
+                                -- Normal ALU / CHERI writeback
+                                let wb_cap = cheri_compute_result(d.opcode, d.funct7, d.funct3, d.rs2_idx, d.pcc, d.pc, d.rs1_cap, d.rs2_cap, d.rs1_val, d.rs2_val, d.imm, result)
+                                writeback.put((d.wb, d.rd, wb_cap))
                                 next_pcc.put(npcc)
                                 stash.put(ExecStash {
                                     phase = 0, rd = 0, funct3 = 0,
                                     rs2_val = 0, rs2_cap = 0,
                                     result = 0, next_pcc = 0, stash_lo = 0
                                 })
+                                trap.put(t)
                             }
-                        }
-                        None => {
-                            -- CHERI-aware writeback
-                            let wb_cap = cheri_compute_result(d.opcode, d.funct7, d.funct3, d.rs2_idx, d.pcc, d.pc, d.rs1_cap, d.rs2_cap, d.rs1_val, d.rs2_val, d.imm, result)
-                            writeback.put((d.wb, d.rd, wb_cap))
-                            next_pcc.put(npcc)
-                            stash.put(ExecStash {
-                                phase = 0, rd = 0, funct3 = 0,
-                                rs2_val = 0, rs2_cap = 0,
-                                result = 0, next_pcc = 0, stash_lo = 0
-                            })
                         }
                     }
                 }
                 None => {
                     stash.put(s)
+                    trap.put(t)
                 }
             }
         } else {
@@ -280,9 +378,11 @@ process Execute {
                             rs2_val = 0, rs2_cap = 0,
                             result = 0, next_pcc = 0, stash_lo = 0
                         })
+                        trap.put(t)
                     }
                     None => {
                         stash.put(s)
+                        trap.put(t)
                     }
                 }
             } else {
@@ -301,9 +401,11 @@ process Execute {
                                 rs2_val = 0, rs2_cap = 0,
                                 result = 0, next_pcc = 0, stash_lo = 0
                             })
+                            trap.put(t)
                         }
                         None => {
                             stash.put(s)
+                            trap.put(t)
                         }
                     }
                 } else {
@@ -320,9 +422,11 @@ process Execute {
                                     result = s.result, next_pcc = s.next_pcc,
                                     stash_lo = lo
                                 })
+                                trap.put(t)
                             }
                             None => {
                                 stash.put(s)
+                                trap.put(t)
                             }
                         }
                     } else {
@@ -341,17 +445,20 @@ process Execute {
                                                 rs2_val = 0, rs2_cap = 0,
                                                 result = 0, next_pcc = 0, stash_lo = 0
                                             })
+                                            trap.put(t)
                                         }
                                         None => {
                                             -- Got high word but not tag yet — stall
                                             -- (put high word back? can't — already consumed)
                                             -- For now: assume same-cycle arrival (same latency)
                                             stash.put(s)
+                                            trap.put(t)
                                         }
                                     }
                                 }
                                 None => {
                                     stash.put(s)
+                                    trap.put(t)
                                 }
                             }
                         } else {
@@ -366,8 +473,10 @@ process Execute {
                                     rs2_val = 0, rs2_cap = 0,
                                     result = 0, next_pcc = 0, stash_lo = 0
                                 })
+                                trap.put(t)
                             } else {
                                 stash.put(s)
+                                trap.put(t)
                             }
                         }
                     }

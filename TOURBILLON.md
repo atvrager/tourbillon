@@ -309,7 +309,7 @@ The child pipe's process network is recursively elaborated and merged into the p
 - **Bus fabric**: CpuDmemAdapter → Xbar (1→2 address-decoded router) → MemDevice + UartPhy
 - **Non-speculative pipeline**: next_pc queue replaces branch prediction; Execute always sends correct next PC after full instruction completion
 - **Split-phase processes**: all bus fabric processes use `try_take` polling for CDC-tolerant multi-cycle operations
-- **Physical UART**: UartTx (shift register serializer), UartRx (phase-based deserializer), UartDevice (bus register map), UartPhy pipe — all Tourbillon, no DPI. 3 MBaud, CTS flow control. TX/RX/RTS/CTS exposed as `external Queue` pins.
+- **Physical UART**: UartTx (shift register serializer), UartRx (phase-based deserializer), UartDevice (bus register map), UartPhy pipe — all Tourbillon, no DPI. 921600 baud, CTS flow control. TX/RX/RTS/CTS exposed as `external Queue` pins.
 
 Simulation: `make -C sim soc-hello` prints "Hello, World!" through the full bus fabric and bit-serial UART.
 

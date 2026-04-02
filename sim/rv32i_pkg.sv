@@ -64,7 +64,7 @@ package rv32i_pkg;
     logic [31:0] imm;
     case (opcode)
       // I-type: instr[31:20] sign-extended
-      OP_I_ALU, OP_LOAD, OP_JALR: begin
+      OP_I_ALU, OP_LOAD, OP_JALR, OP_SYSTEM: begin
         imm = {{20{instr[31]}}, instr[31:20]};
       end
 

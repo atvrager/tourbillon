@@ -161,7 +161,7 @@ sim/
   build_tests.sh     -- Builds rv32ui tests from riscv-tests submodule with custom env
   tests/smoke.S      -- Minimal RV32I smoke test assembly
   tests/smoke.hex    -- Hand-encoded smoke test (hex, no toolchain needed)
-  tests/hello.S      -- "Hello, World!" SoC test (UART TX at 3 MBaud)
+  tests/hello.S      -- "Hello, World!" SoC test (UART TX at 921600 baud)
 rtl/
   marie_top.sv       -- Xilinx VU+ FPGA toplevel: MMCME4 clkgen, rst_sync, STANDALONE param
   fpga_mem.sv        -- Synthesisable memory: distributed RAM (imem) or block RAM (dmem)
