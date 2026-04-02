@@ -49,7 +49,8 @@ verilate: sv
 		\
 		-j $(NPROC) \
 		-I$(SV_DIR) \
-		tb_top.sv rv32i_pkg.sv cheri_pkg.sv mem_model.sv \
+		rv32i_pkg.sv cheri_pkg.sv \
+		tb_top.sv mem_model.sv \
 		$(SV_DIR)/*.sv \
 		tb_cpu.cpp \
 		-o sim_cpu \
@@ -113,7 +114,8 @@ soc-build: soc-sv
 		--top-module soc_top \
 		-j $(NPROC) \
 		-I$(SOC_SV_DIR) \
-		soc_top.sv rv32i_pkg.sv cheri_pkg.sv mem_model.sv \
+		rv32i_pkg.sv cheri_pkg.sv \
+		soc_top.sv mem_model.sv \
 		$(SOC_SV_DIR)/*.sv \
 		soc_tb.cpp \
 		-o sim_soc \
@@ -159,8 +161,9 @@ RTL_DIR := ../rtl
 rtl-check: soc-sv
 	$(VERILATOR) --lint-only -Wall -Wno-fatal \
 		-I$(SOC_SV_DIR) \
+		rv32i_pkg.sv cheri_pkg.sv \
 		$(RTL_DIR)/marie_top.sv $(RTL_DIR)/fpga_mem.sv $(RTL_DIR)/fpga_tag_mem.sv \
-		$(RTL_DIR)/xilinx_stubs.sv rv32i_pkg.sv cheri_pkg.sv \
+		$(RTL_DIR)/xilinx_stubs.sv \
 		$(SOC_SV_DIR)/*.sv
 
 # =========================================================================
