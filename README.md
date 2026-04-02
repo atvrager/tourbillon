@@ -70,7 +70,7 @@ Two export modes:
 
 ## RV32IY CHERI CPU
 
-The CPU is a **purecap CHERI** implementation — every register is a 65-bit capability (32-bit address + 32-bit compressed metadata + 1-bit tag). All memory accesses are mediated by hardware-enforced capabilities with bounds and permission checking. The ISA extension is called **RV32IY** (Y for Tourbillon's CHERI encoding).
+The CPU is a **purecap CHERI** implementation — every register is a 65-bit capability (32-bit address + 32-bit compressed metadata + 1-bit tag). All memory accesses are mediated by hardware-enforced capabilities with bounds and permission checking. The ISA extension **RV32IY** follows the [draft RISC-V CHERI ISA specification](https://www.cheri-cpu.org/) (Zcheripurecap, Y-prefix encoding).
 
 `examples/cpu_core.tbn` defines the pipeline, `examples/rv32i.tbn` the standalone wrapper:
 
