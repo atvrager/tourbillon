@@ -141,8 +141,8 @@ module tb_top (
         end
     end
 
-    // next_pcc_q is pre-loaded with root PCC capability at 0x80000000 by FIFO INIT_VALUE
-    // (tag bit is 0 in Phase 1 — no tag checking yet)
+    // next_pcc_q pre-loaded with root PCC (tag=1, full perms, addr=0x80000000)
+    // via FIFO INIT_VALUE — compiler supports u128 init for 65-bit capabilities
 
     // -------------------------------------------------------------------------
     // tohost monitor — watch for dmem writes to 0x80001000

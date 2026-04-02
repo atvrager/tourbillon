@@ -21,10 +21,9 @@ type RegIdx = Bits 5
 
 enum MemOp = Load | Store | None
 
--- Root PCC init value: 0xFFC0_8180_8000_0000
--- Metadata: SDP=0x3F, AP=RWX, GL=1, CT=0, EF=0, E=24, full bounds.
+-- Root PCC init value: 0x1_FFC0_8180_8000_0000
+-- Tag=1, SDP=0x3F, AP=RWX, GL=1, CT=0, EF=0, E=24 (full bounds).
 -- Address: 0x80000000 (reset vector).
--- Tag bit is 0 (u64 limitation) — acceptable for Phase 1 (no tag checking).
 
 record Decoded {
     op      : Bits 4
@@ -147,6 +146,11 @@ process Decode {
 --
 -- Integer results are written as null capabilities (tag=0, meta=0, addr=result).
 -- Next PCC is derived from the current instruction's PCC with updated address.
+--
+-- Bounds checking: when rs1 has tag=1 (valid capability), loads/stores are
+-- checked against the capability's bounds and permissions. On violation,
+-- the memory access is suppressed, rd is zeroed (loads) or ignored (stores),
+-- and execution continues at the next instruction (soft trap).
 
 process Execute {
     consumes: exec_in        : Queue(Decoded)
@@ -169,22 +173,46 @@ process Execute {
                     -- Derive next PCC: from rs1_cap for JALR, from PCC for others
                     let npcc = cheri_derive_next_pcc(d.opcode, d.pcc, d.rs1_cap, npc)
 
+                    -- Bounds check for memory operations (tag=0 → always pass)
+                    let load_ok  = cheri_mem_access_ok(d.rs1_cap, result, d.funct3, false)
+                    let store_ok = cheri_mem_access_ok(d.rs1_cap, result, d.funct3, true)
+
                     match d.mem {
                         Load => {
-                            dmem_read_req.put(result)
-                            stash.put(ExecStash {
-                                phase = 1, rd = d.rd, funct3 = d.funct3,
-                                rs2_val = d.rs2_val, result = result,
-                                next_pcc = npcc
-                            })
+                            if load_ok == 1 {
+                                dmem_read_req.put(result)
+                                stash.put(ExecStash {
+                                    phase = 1, rd = d.rd, funct3 = d.funct3,
+                                    rs2_val = d.rs2_val, result = result,
+                                    next_pcc = npcc
+                                })
+                            } else {
+                                -- Bounds/permission violation: zero rd, advance PC
+                                writeback.put((true, d.rd, cap_from_int(0)))
+                                next_pcc.put(npcc)
+                                stash.put(ExecStash {
+                                    phase = 0, rd = 0, funct3 = 0,
+                                    rs2_val = 0, result = 0, next_pcc = 0
+                                })
+                            }
                         }
                         Store => {
-                            dmem_read_req.put(result)
-                            stash.put(ExecStash {
-                                phase = 2, rd = d.rd, funct3 = d.funct3,
-                                rs2_val = d.rs2_val, result = result,
-                                next_pcc = npcc
-                            })
+                            if store_ok == 1 {
+                                dmem_read_req.put(result)
+                                stash.put(ExecStash {
+                                    phase = 2, rd = d.rd, funct3 = d.funct3,
+                                    rs2_val = d.rs2_val, result = result,
+                                    next_pcc = npcc
+                                })
+                            } else {
+                                -- Bounds/permission violation: skip store, advance PC
+                                writeback.put((false, d.rd, cap_from_int(0)))
+                                next_pcc.put(npcc)
+                                stash.put(ExecStash {
+                                    phase = 0, rd = 0, funct3 = 0,
+                                    rs2_val = 0, result = 0, next_pcc = 0
+                                })
+                            }
                         }
                         None => {
                             -- CHERI-aware writeback: AUIPC/JAL/JALR produce capabilities,
@@ -275,7 +303,7 @@ pipe CPUCore {
 
     -- Next-PCC queue: Execute → Fetch (carries full capability)
     -- Pre-loaded with root PCC at reset vector 0x80000000.
-    let next_pcc_q = Queue(Cap, depth = 1, init = 0xFFC0818080000000)
+    let next_pcc_q = Queue(Cap, depth = 1, init = 0x1FFC0818080000000)
 
     -- Instruction memory (local, fast path)
     let imem = Memory(Addr → Word, depth = 4096, latency = 1)

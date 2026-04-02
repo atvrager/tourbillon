@@ -61,13 +61,13 @@ pub struct QueueEdge {
 pub enum QueueEdgeKind {
     Queue {
         /// Number of initial tokens pre-loaded at reset (from `init = N`).
-        init_tokens: u64,
+        init_tokens: u128,
         /// External queue — no FIFO instantiated, signals become module ports.
         is_external: bool,
     },
     Cell {
         peeker_instances: Vec<String>,
-        init: Option<u64>,
+        init: Option<u128>,
     },
     /// Async FIFO for clock domain crossing. No init tokens, no peekers.
     AsyncQueue,

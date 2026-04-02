@@ -268,7 +268,7 @@ fn desugar_memory(mem: &MemoryDecl) -> (Vec<QueueDecl>, Process, Instance) {
                     Spanned::new(
                         Stmt::Put {
                             target: Spanned::new("read_resp".to_string(), span.clone()),
-                            value: Spanned::new(Expr::Lit(Literal::Int(0)), span.clone()),
+                            value: Spanned::new(Expr::Lit(Literal::Int(0u128)), span.clone()),
                         },
                         span.clone(),
                     ),
@@ -635,7 +635,7 @@ fn expand_indexed_put(
 ) -> Spanned<Stmt> {
     let arms: Vec<MatchArm> = (0..size)
         .map(|i| MatchArm {
-            pattern: Spanned::new(Pattern::Literal(Literal::Int(i)), span.clone()),
+            pattern: Spanned::new(Pattern::Literal(Literal::Int(i as u128)), span.clone()),
             body: vec![Spanned::new(
                 Stmt::Put {
                     target: Spanned::new(format!("{array_name}_{i}"), span.clone()),
@@ -688,7 +688,7 @@ fn expand_indexed_let(
                 _ => unreachable!(),
             };
             MatchArm {
-                pattern: Spanned::new(Pattern::Literal(Literal::Int(i)), span.clone()),
+                pattern: Spanned::new(Pattern::Literal(Literal::Int(i as u128)), span.clone()),
                 body: vec![Spanned::new(
                     Stmt::Let {
                         pattern: pattern.clone(),

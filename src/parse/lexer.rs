@@ -15,7 +15,7 @@ pub fn lexer<'src>()
                 .to_slice()
                 .map(|s: &str| {
                     let stripped: String = s.chars().filter(|c| *c != '_').collect();
-                    u64::from_str_radix(&stripped, 16).unwrap_or(0)
+                    u128::from_str_radix(&stripped, 16).unwrap_or(0)
                 }),
         );
 
@@ -30,7 +30,7 @@ pub fn lexer<'src>()
             .to_slice()
             .map(|s: &str| {
                 let stripped: String = s.chars().filter(|c| *c != '_').collect();
-                stripped.parse::<u64>().unwrap_or(0)
+                stripped.parse::<u128>().unwrap_or(0)
             });
 
         hex.or(dec).map(Token::Int)

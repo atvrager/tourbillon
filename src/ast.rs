@@ -264,7 +264,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum Literal {
-    Int(u64),
+    Int(u128),
     Bool(bool),
 }
 
@@ -327,7 +327,7 @@ pub struct QueueDecl {
     pub depth: Option<u64>,
     /// Number of initial tokens pre-loaded at reset.
     /// `init = N` in pipe declarations; enables deadlock-free cycles.
-    pub init_tokens: Option<u64>,
+    pub init_tokens: Option<u128>,
     /// `external Queue(...)` — no FIFO instantiated, signals become module ports.
     pub is_external: bool,
 }

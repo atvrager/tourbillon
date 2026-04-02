@@ -72,7 +72,7 @@ fn parse_dotted_target(target: &str) -> Option<(&str, &str)> {
 }
 
 /// Extract the init literal value from a Cell type expression.
-fn extract_init_value(ty_expr: &TypeExpr) -> Option<u64> {
+fn extract_init_value(ty_expr: &TypeExpr) -> Option<u128> {
     if let TypeExpr::Cell {
         init: Some(init_expr),
         ..
