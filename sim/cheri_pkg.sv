@@ -108,41 +108,73 @@ package cheri_pkg;
       return {cap[40:39], cap[34:32]};  // {TE[1:0], addr-relative BE[2:0]}
   endfunction
 
-  // Decode base address from compressed bounds
+  // -----------------------------------------------------------------------
+  // Bounds decode (CHERI Concentrate)
+  // -----------------------------------------------------------------------
+  // The compressed bounds store mantissa values (B, T) that represent
+  // base and top within a region determined by the exponent E.
+  // Full 32-bit base/top are reconstructed by combining the mantissa
+  // with the address's upper bits, plus carry correction.
+  //
+  // For E=0 (EF=1, exact):
+  //   base = {addr[31:10], B[9:0]}
+  //   top  = {addr[31:10], T[9:0]}
+  //   if T < B: top region += 1 (carry)
+  //
+  // For E>0 (EF=0, inexact):
+  //   base = {addr[31:E+10], B[9:0], E zeros}
+  //   top  = {addr[31:E+10], T[9:0], E zeros}
+  //   carry correction similarly applied
+
   function automatic [31:0] cap_get_base(input [64:0] cap);
     logic [4:0]  e;
     logic [9:0]  b_mantissa;
+    logic [9:0]  t_mantissa;
+    logic [31:0] addr;
     logic [31:0] base;
+    logic [31:0] addr_hi;
 
+    addr = cap[31:0];
     e = cap_decode_e(cap);
 
-    if (cap[49]) begin  // EF=1, exact
+    if (cap[49]) begin  // EF=1, exact: E=0
       b_mantissa = {cap[38:32], 3'b000};
+      base = {addr[31:10], b_mantissa};
     end else begin
-      b_mantissa = {cap[38:32], 3'b000};  // low bits used for E encoding
+      b_mantissa = {cap[38:32], 3'b000};
+      // Shift mantissa left by E, fill upper bits from addr
+      base = ((addr >> (e + 5'd10)) << (e + 5'd10)) | ({22'b0, b_mantissa} << e);
     end
 
-    // Base = B_mantissa << E
-    base = {22'b0, b_mantissa} << e;
     return base;
   endfunction
 
-  // Decode top (may be 33 bits for wrap-around)
   function automatic [32:0] cap_get_top(input [64:0] cap);
     logic [4:0]  e;
+    logic [9:0]  b_mantissa;
     logic [9:0]  t_mantissa;
+    logic [31:0] addr;
+    logic [31:0] base;
     logic [32:0] top;
+    logic        carry;
 
+    addr = cap[31:0];
     e = cap_decode_e(cap);
 
-    if (cap[49]) begin  // EF=1, exact
+    if (cap[49]) begin  // EF=1, exact: E=0
+      b_mantissa = {cap[38:32], 3'b000};
       t_mantissa = cap[48:39];
+      carry = (t_mantissa < b_mantissa) ? 1'b1 : 1'b0;
+      top = {1'b0, addr[31:10], t_mantissa} + {23'b0, carry, 10'b0};
     end else begin
-      t_mantissa = {cap[48:41], 2'b00};  // TE[9:2], low bits used for E
+      b_mantissa = {cap[38:32], 3'b000};
+      t_mantissa = {cap[48:41], 2'b00};
+      carry = (t_mantissa < b_mantissa) ? 1'b1 : 1'b0;
+      top = ({1'b0, ((addr >> (e + 5'd10)) << (e + 5'd10))} |
+             ({23'b0, t_mantissa} << e)) +
+            ({33'b0, carry} << (e + 5'd10));
     end
 
-    // Top = T_mantissa << E
-    top = {23'b0, t_mantissa} << e;
     return top;
   endfunction
 
@@ -310,6 +342,55 @@ package cheri_pkg;
   localparam [4:0] SCR_MTVEC  = 5'd28;
   localparam [4:0] SCR_MEPC   = 5'd29;
   localparam [4:0] SCR_MTDC   = 5'd30;
+
+  // -----------------------------------------------------------------------
+  // Memory access size from funct3
+  // -----------------------------------------------------------------------
+
+  function automatic [31:0] mem_access_size(input [2:0] funct3);
+    case (funct3)
+      3'b000, 3'b100: return 32'd1;  // LB/LBU/SB
+      3'b001, 3'b101: return 32'd2;  // LH/LHU/SH
+      3'b010:         return 32'd4;  // LW/SW
+      3'b011:         return 32'd8;  // LC/SC (capability width)
+      default:        return 32'd4;
+    endcase
+  endfunction
+
+  // -----------------------------------------------------------------------
+  // Combined memory access check (bounds + permissions)
+  // -----------------------------------------------------------------------
+  // Returns 1 if access is allowed, 0 if violation.
+  // When tag=0 (integer pointer), always returns 1 (Phase 1 compatibility).
+  // When tag=1, checks both bounds and permissions.
+
+  function automatic cheri_mem_access_ok(
+    input [64:0] cap,
+    input [31:0] eff_addr,   // effective address (already computed: cap.addr + offset)
+    input [2:0]  funct3,     // access width encoding
+    input        is_store    // 0=load, 1=store
+  );
+    logic [31:0] size;
+    logic [32:0] top;
+    logic [31:0] base;
+
+    // Tag=0 → integer pointer, no bounds check (backward compatible)
+    if (!cap[64])
+      return 1'b1;
+
+    // Permission check
+    if (is_store) begin
+      if ((cap[57:55] & PERM_W) == 3'b0) return 1'b0;
+    end else begin
+      if ((cap[57:55] & PERM_R) == 3'b0) return 1'b0;
+    end
+
+    // Bounds check
+    size = mem_access_size(funct3);
+    top = cap_get_top(cap);
+    base = cap_get_base(cap);
+    return (eff_addr >= base) && ({1'b0, eff_addr} + {1'b0, size} <= top);
+  endfunction
 
   // -----------------------------------------------------------------------
   // RVY instruction encoding constants

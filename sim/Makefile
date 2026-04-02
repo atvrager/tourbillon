@@ -301,8 +301,14 @@ tests/cheri_basic.elf: tests/cheri_basic.S
 	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/cheri_basic.elf tests/cheri_basic.o
 	@rm -f tests/cheri_basic.o
 
-cheri-test: build tests/cheri_basic.elf
+tests/cheri_bounds.elf: tests/cheri_bounds.S
+	$(AS) -march=rv32i -mabi=ilp32 -o tests/cheri_bounds.o tests/cheri_bounds.S
+	$(LD) -Ttext=0x80000000 -melf32lriscv -o tests/cheri_bounds.elf tests/cheri_bounds.o
+	@rm -f tests/cheri_bounds.o
+
+cheri-test: build tests/cheri_basic.elf tests/cheri_bounds.elf
 	$(SIM_BIN) tests/cheri_basic.elf
+	$(SIM_BIN) tests/cheri_bounds.elf
 
 # Check CHERI toolchain is available
 cheri-check:
